@@ -6,8 +6,9 @@ import numpy as np
 import pytest
 
 from pipeline.errors import NoSpeechDetectedError
+from pipeline.models import Segment
 from pipeline.segmentation import Region
-from pipeline.stt import transcribe_regions
+from pipeline.stt import merge_sentence_fragments, transcribe_regions
 from tests.conftest import FakeGemini
 
 RATE = 16000
@@ -15,6 +16,27 @@ RATE = 16000
 
 def audio(seconds: float) -> np.ndarray:
     return np.full(int(RATE * seconds), 1000, dtype="<i2")
+
+
+def test_merge_sentence_fragments_joins_open_fragments_into_full_sentences():
+    """Mảnh không kết bằng dấu câu được nối với mảnh sau; câu trọn thì đứng riêng."""
+    segs = [
+        Segment(0.0, 2.0, "You're in the right place"),   # dang dở
+        Segment(2.3, 4.0, "if you use Claude every day."),  # đóng câu
+        Segment(5.0, 7.0, "Let's get started."),           # trọn vẹn
+    ]
+    merged = merge_sentence_fragments(segs, max_duration=12.0)
+    assert len(merged) == 2
+    assert merged[0].text == "You're in the right place if you use Claude every day."
+    assert merged[0].start == 0.0 and merged[0].end == 4.0   # mốc thật: đầu mảnh đầu → cuối mảnh cuối
+    assert merged[1].text == "Let's get started."
+
+
+def test_merge_respects_max_duration_so_long_sentences_are_not_glued_forever():
+    """Không gộp nếu vượt trần: câu dài >max_duration vẫn tách để tránh lượt vô hạn."""
+    segs = [Segment(0.0, 8.0, "a long open fragment"), Segment(8.0, 18.0, "that keeps going")]
+    merged = merge_sentence_fragments(segs, max_duration=12.0)   # gộp lại 18s > 12s
+    assert len(merged) == 2
 
 
 def test_segment_timing_comes_from_the_region_not_the_model(tmp_path):

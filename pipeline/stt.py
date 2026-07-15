@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,38 @@ from .models import CancelFn, GeminiBackend, ProgressFn, Segment, never_cancel, 
 from .segmentation import Region
 
 log = logging.getLogger(__name__)
+
+# Ký tự kết thúc một câu trọn vẹn (Whisper/Gemini có chấm câu). Mảnh KHÔNG kết bằng
+# một trong số này nghĩa là câu còn dang dở, nối tiếp sang vùng sau.
+_SENTENCE_END = tuple(".!?…")
+
+
+def merge_sentence_fragments(segments: list[Segment], max_duration: float) -> list[Segment]:
+    """Gộp các mảnh vụn thành CÂU TRỌN theo dấu câu, không vượt `max_duration`.
+
+    Segmentation cắt theo khoảng lặng của audio TIẾNG ANH, nên một câu hay bị chẻ thành
+    nhiều mảnh ở chỗ người nói ngừng lấy hơi. Dịch & đọc từng mảnh rời làm cụm tiếng Việt
+    bị ngắt giữa chừng ("Hôm ...(nghỉ)... nay") và lệch nhịp so với hình. Gộp lại theo câu
+    (mảnh không kết bằng .!?… được nối với mảnh sau) cho tiếng Việt liền mạch, dịch đúng
+    ngữ cảnh cả câu. Trần `max_duration` chặn câu dài vô hạn khi thiếu chấm câu.
+
+    Chỉ đụng khi nhận diện chạy TRÊN MÁY có chấm câu (Whisper). Mốc thời gian gộp lại là
+    (đầu mảnh đầu, cuối mảnh cuối) — vẫn là mốc thật của ffmpeg.
+    """
+    if not segments:
+        return []
+    merged: list[Segment] = [segments[0]]
+    for seg in segments[1:]:
+        prev = merged[-1]
+        prev_open = not prev.text.strip().rstrip('"”\'’)').endswith(_SENTENCE_END)
+        if prev_open and (seg.end - prev.start) <= max_duration:
+            merged[-1] = replace(prev, end=seg.end,
+                                 text=f"{prev.text.strip()} {seg.text.strip()}".strip())
+        else:
+            merged.append(seg)
+    if len(merged) != len(segments):
+        log.info("Gộp mảnh vụn theo câu: %d vùng → %d câu", len(segments), len(merged))
+    return merged
 
 
 def transcribe_regions(

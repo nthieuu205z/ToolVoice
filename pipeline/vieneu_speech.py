@@ -63,12 +63,23 @@ def _uses_gpu() -> bool:
     return uses_gpu()
 
 
+# Đo thật (RTX 3090): lô 48 câu tốn ~2,4 GB VRAM ngoài model → ~50 MB hoạt hình mỗi câu.
+# Đây là thuộc tính của MODEL, gần như không đổi giữa các card — nên chia VRAM trống cho nó
+# là suy ra được cỡ lô card chịu nổi. Nhờ vậy công thức tự ép tối đa mọi loại GPU thay vì
+# ghim một con số: card 24 GB sẽ chạy lô lớn hơn hẳn card 8 GB.
+_VRAM_PER_ITEM_GB = 0.05
+# Trần: thuật toán kẹt ở chi phí PHÓNG kernel (một bước ở batch 1 và batch 64 tốn gần bằng
+# nhau), nên lô >64 gần như không nhanh thêm mà câu ngắn phải chờ câu dài nhất → phí. Đây là
+# "knee" đo được của THUẬT TOÁN, không phải giới hạn của card.
+_BATCH_CAP = 64
+_BATCH_MIN = 8
+
+
 def batch_size() -> int:
     """Số câu gộp một lô. 0 = không gộp (đường ONNX/CPU chỉ sinh từng câu một).
 
-    Lô càng lớn càng lời, nhưng mọi hàng trong lô phải chạy tới khi hàng DÀI NHẤT đọc xong
-    — nên lô quá to lại phí công cho những câu đã kết thúc sớm. 32 là chỗ cân bằng đo được;
-    bộ nhớ không phải mối lo (lô 48 câu chỉ tốn 2,4 GB VRAM).
+    Suy ra từ VRAM CÒN TRỐNG lúc chạy (tự thích nghi mọi card), không ghim cứng. Ép cứng
+    được qua VIENEU_BATCH_SIZE trong .env nếu muốn.
     """
     if not _uses_gpu():
         return 0
@@ -77,10 +88,13 @@ def batch_size() -> int:
     try:
         import torch
 
-        gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        free_bytes, _total = torch.cuda.mem_get_info()
+        free_gb = free_bytes / 1024**3
     except Exception:
-        return 8
-    return 32 if gb >= 8 else 8
+        return _BATCH_MIN
+    # Chừa 25% VRAM trống cho phân mảnh + codec + đỉnh nhất thời; phần còn lại chia đều.
+    n = int(free_gb * 0.75 / _VRAM_PER_ITEM_GB)
+    return max(_BATCH_MIN, min(n, _BATCH_CAP))
 
 
 def forget_clone(voice_id: str) -> None:

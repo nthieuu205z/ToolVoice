@@ -22,7 +22,7 @@ from .models import (
 from .mux import run_mux
 from .probe import probe_video
 from .segmentation import plan_utterances
-from .stt import transcribe_regions
+from .stt import merge_sentence_fragments, transcribe_regions
 from .subtitles import build_srt
 from .translate import translate_segments
 from .tts import synthesize_segments
@@ -89,6 +89,11 @@ def run_pipeline(
         workers=options.stt_workers, progress=progress, should_cancel=should_cancel,
     )
     warnings.extend(stt_warnings)
+
+    # 2b. Gộp mảnh vụn thành câu trọn theo dấu câu: ffmpeg cắt theo im lặng nên hay chẻ
+    # một câu thành nhiều vùng ở chỗ ngừng lấy hơi. Gộp lại cho tiếng Việt liền mạch,
+    # dịch đúng cả câu, và hết cảnh "Hôm ...(nghỉ)... nay".
+    segments = merge_sentence_fragments(segments, options.max_utterance_seconds)
 
     # 3. Dịch
     segments = translate_segments(backend, segments, progress, should_cancel)

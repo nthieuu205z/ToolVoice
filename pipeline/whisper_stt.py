@@ -100,9 +100,21 @@ def batch_size() -> int:
         gộp lô 32 vùng     :  7 giây   (GPU 65%, 254W)   ← nhanh gấp 9,4 lần
 
     Chạy đa luồng KHÔNG cứu được (đã đo: num_workers 1→8 chỉ nhanh gấp 1,2 lần rồi chững).
+
+    Cỡ lô suy ra từ VRAM còn trống (tự thích nghi mọi card) thay vì ghim 32; card lớn chạy
+    lô lớn hơn. Whisper 'small' gộp lô tốn ~0,2 GB/vùng; chừa 30%, trần 48 (knee thuật toán).
     """
     device, _ = _thiet_bi()
-    return 32 if device == "cuda" else 0
+    if device != "cuda":
+        return 0
+    try:
+        import torch
+
+        free_gb = torch.cuda.mem_get_info()[0] / 1024**3
+    except Exception:
+        return 16
+    n = int(free_gb * 0.7 / 0.2)
+    return max(8, min(n, 48))
 
 
 @lru_cache(maxsize=1)
