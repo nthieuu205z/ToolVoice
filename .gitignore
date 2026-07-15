@@ -1,0 +1,28 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.DS_Store
+jobs/
+bin/
+web/static/previews/*.wav
+web/static/previews/*.mp3
+tests/fixtures/*.mp4
+!tests/fixtures/.gitkeep
+custom_voices/
+
+# Bản sao đầy đủ bị lồng bên trong project (có .git/.venv/jobs riêng, ~5.4GB).
+# Không commit; sẽ quyết định giữ/xóa/di dời sau.
+ToolVietSub/
+
+# Bản Mac tham khảo (có .git/.env riêng) — chỉ để đối chiếu, không version trong repo này.
+ToolVietSubMac/
+
+# Thư mục skills của agent, không thuộc ứng dụng.
+.Agent/
+
+# Build artifact của Python.
+*.egg-info/

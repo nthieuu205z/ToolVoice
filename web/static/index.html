@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sub. — Lồng tiếng Việt cho mọi video</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=Be+Vietnam+Pro:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="noise" aria-hidden="true"></div>
+<div class="glow" id="glow" aria-hidden="true"></div>
+
+<header class="topbar">
+  <a class="brand" href="#top">Sub<span class="b-dot">.</span></a>
+  <div class="top-right">
+    <span class="mock-badge" id="mockBadge" hidden><span class="mb-dot"></span>Chế độ xem thử</span>
+    <span class="top-note">Chạy trên máy của bạn · tối đa 2 video song song</span>
+  </div>
+</header>
+
+<section class="hero" id="top">
+  <h1 class="hero-title" aria-label="Sub">
+    <span class="ht-mask"><span class="ht" style="animation-delay:.05s">S</span></span><span class="ht-mask"><span class="ht" style="animation-delay:.13s">u</span></span><span class="ht-mask"><span class="ht" style="animation-delay:.21s">b</span></span><span class="ht-mask"><span class="ht ht-dot" style="animation-delay:.32s">.</span></span>
+  </h1>
+  <p class="hero-sub">Nhận diện lời thoại, dịch sang tiếng Việt, lồng giọng đọc thay audio gốc và xuất kèm phụ đề — tất cả chạy ngay trên máy bạn.</p>
+  <a class="hero-cta" href="#tool">Bắt đầu <span class="hc-arrow">↓</span></a>
+</section>
+
+<div class="marquee" aria-hidden="true">
+  <div class="marquee-track">
+    <span>Nhận diện</span><i>✦</i><span>Dịch thuật</span><i>✦</i><span>Lồng tiếng</span><i>✦</i><span>Phụ đề .srt</span><i>✦</i>
+    <span>Nhận diện</span><i>✦</i><span>Dịch thuật</span><i>✦</i><span>Lồng tiếng</span><i>✦</i><span>Phụ đề .srt</span><i>✦</i>
+    <span>Nhận diện</span><i>✦</i><span>Dịch thuật</span><i>✦</i><span>Lồng tiếng</span><i>✦</i><span>Phụ đề .srt</span><i>✦</i>
+  </div>
+</div>
+
+<main class="wrap" id="tool">
+
+  <!-- 01 · Thêm video -->
+  <section class="sec reveal" id="sec-upload">
+    <div class="sec-head"><span class="sec-num">01</span><h2>Thêm video</h2></div>
+    <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Chọn hoặc kéo thả video">
+      <input type="file" id="fileInput" accept="video/*" hidden>
+      <div class="dz-idle" id="dzIdle">
+        <div class="dz-big">Kéo thả video vào đây</div>
+        <div class="dz-small">hoặc bấm để chọn file · .mp4, .mkv… · tối đa 8 GB</div>
+      </div>
+      <div class="dz-file" id="dzFile" hidden>
+        <div class="dz-fileinfo">
+          <div class="dz-name" id="dzName"></div>
+          <div class="dz-meta" id="dzMeta"></div>
+        </div>
+        <button class="chip-x" id="dzRemove" type="button" aria-label="Bỏ chọn file">×</button>
+      </div>
+    </div>
+    <div class="upload-progress" id="uploadProgress" hidden>
+      <div class="up-row"><span id="upLabel">Đang tải lên…</span><span class="up-pct" id="upPct">0%</span></div>
+      <div class="bar"><div class="bar-fill" id="upBar"></div></div>
+      <div class="up-bytes" id="upBytes"></div>
+    </div>
+    <div class="start-row">
+      <button class="btn-primary" id="startBtn" disabled>Bắt đầu chuyển đổi</button>
+      <p class="start-hint" id="startHint"></p>
+    </div>
+  </section>
+
+  <!-- 02 · Model trên máy -->
+  <section class="sec reveal" id="sec-models" hidden>
+    <div class="sec-head"><span class="sec-num">02</span><h2>Model trên máy</h2></div>
+    <div class="model-grid" id="modelGrid"></div>
+  </section>
+
+  <!-- 03 · Giọng đọc -->
+  <section class="sec reveal" id="sec-voices">
+    <div class="sec-head"><span class="sec-num">03</span><h2>Chọn giọng đọc</h2></div>
+    <div class="voice-grid" id="voiceGrid"></div>
+    <div class="clone" id="cloneBlock" hidden>
+      <button class="clone-toggle" type="button" data-action="clone-toggle" id="cloneToggle"><span class="ct-plus">+</span> Nhân bản giọng của bạn</button>
+      <form class="clone-form" id="cloneForm" hidden>
+        <div class="cf-grid">
+          <label class="cf-field">
+            <span class="cf-label">Tên giọng</span>
+            <input type="text" id="cloneName" maxlength="40" placeholder="Ví dụ: Giọng của tôi" autocomplete="off">
+          </label>
+          <label class="cf-field cf-file">
+            <span class="cf-label">File audio mẫu</span>
+            <input type="file" id="cloneAudio" accept="audio/*" hidden>
+            <span class="cf-filebtn" id="cloneAudioLabel">Chọn file · 3–8 giây, một người nói, ít tạp âm</span>
+          </label>
+          <button class="btn-primary btn-sm" type="submit" data-action="clone-create" id="cloneCreate">Tạo giọng</button>
+        </div>
+        <p class="clone-note">Chỉ dùng giọng bạn có quyền sử dụng.</p>
+        <p class="clone-msg" id="cloneMsg" hidden></p>
+      </form>
+    </div>
+  </section>
+
+  <!-- 04 · Danh sách video -->
+  <section class="sec reveal" id="sec-jobs">
+    <div class="sec-head"><span class="sec-num">04</span><h2>Video của bạn</h2></div>
+    <div class="job-list" id="jobList"></div>
+    <p class="jobs-empty" id="jobsEmpty">Chưa có video nào. Thêm video ở trên để bắt đầu.</p>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <span class="brand brand-sm">Sub<span class="b-dot">.</span></span>
+  <span>Chạy hoàn toàn trên máy của bạn — video không rời khỏi máy.</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

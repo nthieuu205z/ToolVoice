@@ -1,0 +1,189 @@
+"""Vòng đời một công việc: nhận video → chạy pipeline → trả file kết quả."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import shutil
+import uuid
+from pathlib import Path
+
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
+
+from backend.config import settings
+from backend.job_manager import Job, manager
+from pipeline.backends import CompositeBackend, build_backend
+from pipeline.errors import UnsupportedMediaError
+from pipeline.probe import probe_video
+from pipeline.runner import PipelineOptions
+from pipeline.voices import is_valid
+
+router = APIRouter()
+
+_UPLOAD_CHUNK = 1024 * 1024
+_SSE_POLL_SECONDS = 0.4
+_SSE_HEARTBEAT_SECONDS = 15.0
+# Giữ lại các job gần nhất để còn tải kết quả về; cũ hơn thì dọn cho nhẹ đĩa.
+_KEEP_JOB_DIRS = 10
+
+
+def _make_backend() -> CompositeBackend:
+    return build_backend(settings.provider_config)
+
+
+@router.post("/api/jobs")
+async def create_job(video: UploadFile = File(...), voice_id: str = Form(...)) -> dict:
+    # Bước dịch luôn cần Gemini, kể cả khi nhận diện và giọng đọc đã chạy miễn phí.
+    if not settings.gemini_api_key:
+        raise HTTPException(500, "Chưa có GEMINI_API_KEY. Tạo file .env từ .env.example rồi điền khóa.")
+    if not is_valid(voice_id, settings.tts_provider):
+        raise HTTPException(400, f"Giọng đọc không hợp lệ: {voice_id}")
+
+    manager.prune(settings.jobs_dir, keep=_KEEP_JOB_DIRS)
+    workdir = settings.jobs_dir / uuid.uuid4().hex[:12]
+    workdir.mkdir(parents=True)
+
+    video_path = workdir / f"input{Path(video.filename or 'video.mp4').suffix or '.mp4'}"
+    await _save_upload(video, video_path)
+
+    # ffprobe trước khi tiêu tốn bất kỳ token Gemini nào.
+    try:
+        media = probe_video(video_path)
+    except UnsupportedMediaError as exc:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise HTTPException(400, exc.user_message) from exc
+
+    options = PipelineOptions(
+        voice_id=voice_id,
+        max_utterance_seconds=settings.max_utterance_seconds,
+        max_utterance_gap=settings.max_utterance_gap,
+        stt_workers=settings.stt_workers,
+        tts_workers=settings.tts_workers,
+        tts_max_speedup=settings.tts_max_speedup,
+        tts_daily_budget=settings.tts_daily_budget,
+        tts_is_metered=settings.tts_provider == "gemini",
+    )
+    job = manager.start(
+        filename=video.filename or video_path.name,
+        workdir=workdir,
+        voice_id=voice_id,
+        video_path=video_path,
+        media=media,
+        backend_factory=_make_backend,
+        options=options,
+    )
+    return {"job_id": job.id}
+
+
+@router.get("/api/jobs")
+def list_jobs() -> dict:
+    """Danh sách mọi job, mới nhất trước — giao diện vẽ thẳng từ đây."""
+    return {"jobs": manager.jobs()}
+
+
+async def _save_upload(video: UploadFile, dest: Path) -> None:
+    """Ghi từng khối để video lớn không phải nằm hết trong RAM, và chặn file quá cỡ."""
+    limit = settings.max_upload_mb * 1024 * 1024
+    written = 0
+    with dest.open("wb") as out:
+        while chunk := await video.read(_UPLOAD_CHUNK):
+            written += len(chunk)
+            if written > limit:
+                out.close()
+                shutil.rmtree(dest.parent, ignore_errors=True)
+                raise HTTPException(413, f"Video vượt quá giới hạn {settings.max_upload_mb} MB.")
+            out.write(chunk)
+    if written == 0:
+        raise HTTPException(400, "File tải lên rỗng.")
+
+
+@router.get("/api/jobs/current")
+def current_job() -> dict:
+    job = manager.current
+    return job.snapshot() if job else {}
+
+
+@router.get("/api/jobs/{job_id}")
+def job_status(job_id: str) -> dict:
+    return _require(job_id).snapshot()
+
+
+@router.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str) -> dict:
+    """Yêu cầu dừng. Pipeline dừng ở mốc an toàn gần nhất, không giết thread giữa chừng."""
+    try:
+        return manager.cancel(job_id).snapshot()
+    except LookupError:
+        raise HTTPException(404, "Không tìm thấy công việc này.") from None
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.get("/api/jobs/{job_id}/events")
+async def job_events(job_id: str) -> StreamingResponse:
+    """SSE bằng cách theo dõi trạng thái job — không cần hàng đợi giữa thread và event loop."""
+    _require(job_id)
+
+    async def stream():
+        last: dict | None = None
+        idle = 0.0
+        while True:
+            job = manager.get(job_id)
+            if job is None:
+                break
+
+            snapshot = job.snapshot()
+            if snapshot != last:
+                yield f"data: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
+                last = snapshot
+                idle = 0.0
+            elif idle >= _SSE_HEARTBEAT_SECONDS:
+                yield ": keepalive\n\n"  # giữ kết nối qua proxy/trình duyệt
+                idle = 0.0
+
+            if job.status in ("done", "error", "cancelled"):
+                break
+
+            await asyncio.sleep(_SSE_POLL_SECONDS)
+            idle += _SSE_POLL_SECONDS
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/api/jobs/{job_id}/download/video")
+def download_video(job_id: str) -> FileResponse:
+    job = _require_done(job_id)
+    path = Path(job.video_path)
+    stem = Path(job.filename).stem
+    return _serve(path, f"{stem}_vi{path.suffix}")
+
+
+@router.get("/api/jobs/{job_id}/download/srt")
+def download_srt(job_id: str) -> FileResponse:
+    job = _require_done(job_id)
+    return _serve(Path(job.srt_path), f"{Path(job.filename).stem}_vi.srt")
+
+
+def _serve(path: Path, download_name: str) -> FileResponse:
+    if not path.is_file():
+        raise HTTPException(404, "Không tìm thấy file kết quả.")
+    return FileResponse(path, filename=download_name)
+
+
+def _require(job_id: str) -> Job:
+    job = manager.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Không tìm thấy công việc này.")
+    return job
+
+
+def _require_done(job_id: str) -> Job:
+    job = _require(job_id)
+    if job.status != "done":
+        raise HTTPException(409, "Công việc chưa hoàn tất.")
+    return job
