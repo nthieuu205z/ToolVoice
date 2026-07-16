@@ -124,6 +124,33 @@ def _get_pipeline(model):
     return BatchedInferencePipeline(model=model)
 
 
+def prewarm(model: str = "small", compute_type: str = "int8") -> None:
+    """Nạp model Whisper trong luồng nền lúc server khởi động — job đầu khỏi chờ tải model.
+
+    Đo thật: lần nhận diện đầu tốn ~24s, trong đó ~11s chỉ để nạp model + khởi tạo cuDNN;
+    phần chép lời thật chỉ ~13s. Nạp sẵn từ lúc boot (song song với VieNeu) để job đầu chỉ
+    còn phần tính. Chỉ nạp khi model đã nằm trên đĩa — không tự ý tải 484 MB lúc boot.
+    """
+    from .model_store import is_ready, whisper_spec
+
+    try:
+        if not is_ready(whisper_spec(model)):
+            log.info("Whisper chưa tải về — bỏ qua nạp sẵn, chờ người dùng bấm tải")
+            return
+    except Exception as exc:
+        log.warning("Không kiểm tra được model Whisper: %s", exc)
+        return
+
+    def load() -> None:
+        try:
+            _get_pipeline(_get_model(model, compute_type))   # nạp cả BatchedInferencePipeline
+            log.info("Whisper sẵn sàng (%s)", _thiet_bi()[0].upper())
+        except Exception as exc:
+            log.warning("Không nạp sẵn được Whisper (job đầu sẽ tự nạp): %s", exc)
+
+    threading.Thread(target=load, name="whisper-prewarm", daemon=True).start()
+
+
 _SENTENCE_END = (".", "!", "?", "…")
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -236,6 +237,32 @@ def _chia_lo(so_luong: int, tran: int) -> list[int]:
     return [deu + (1 if i < du else 0) for i in range(so_lo)]
 
 
+def _lo_theo_do_dai(todo: list[tuple[int, Segment]], tran: int) -> list[list[int]]:
+    """Xếp câu ĐỘ DÀI GẦN NHAU vào cùng lô — GIỮ NGUYÊN số lô như chia đều.
+
+    Vì sao: vòng sinh token tự hồi quy chạy tới khi câu DÀI NHẤT trong lô đọc xong, và một
+    bước tốn gần như nhau ở batch 1 hay batch 64 (nghẽn ở phóng kernel, không phải sức tính).
+    Nên chi phí một lô ≈ SỐ FRAME của câu dài nhất, gần như KHÔNG phụ thuộc số câu. Chia đều
+    theo thứ tự gốc → lô nào cũng dính một câu dài → mọi lô chạy tới đỉnh. Sắp giảm dần rồi
+    vẫn chia thành ĐÚNG bấy nhiêu lô: câu dài dồn vào ít lô đầu, các lô sau chỉ chạy đúng độ
+    dài ngắn của chúng → tổng frame giảm hẳn (đo thật: generate 21s → ~8s).
+
+    VRAM không tăng: lô dài nhất vẫn `tran` câu như một lô chia-đều bất kỳ (vốn cũng dính câu
+    dài nhất do trộn ngẫu nhiên), lại còn ít đệm hơn vì các câu trong lô dài xấp xỉ nhau.
+    Không đổi số lô nên không phát sinh lô thừa. Cùng công thức tự ép mọi loại GPU.
+    """
+    if not todo:
+        return []
+    lens = [max(1, len(seg.text_vi)) for _, seg in todo]
+    order = sorted(range(len(todo)), key=lambda k: lens[k], reverse=True)
+    batches: list[list[int]] = []
+    i = 0
+    for sz in _chia_lo(len(order), max(1, tran)):
+        batches.append(order[i : i + sz])
+        i += sz
+    return batches
+
+
 def _synthesize_theo_lo(
     backend: GeminiBackend, segments: list[Segment], todo: list[tuple[int, Segment]],
     voice_id: str, *, max_speedup: float, total_duration: float | None,
@@ -249,24 +276,24 @@ def _synthesize_theo_lo(
     - Một lượt hỏng không giết cả video: lô nào ném lỗi thì lùi về đọc từng câu trong lô đó,
       để chỉ đúng câu hỏng bị bỏ trống chứ không mất cả 32 câu cùng nó.
     """
-    results: dict[int, np.ndarray] = {}
     warnings: list[str] = []
-    overflowed = failed = 0
+    failed = 0
+    quota_hit = False
     xong = 0
 
-    vi_tri = 0
-    for co_lo in _chia_lo(len(todo), backend.batch_size):
+    # ── ĐỌC theo lô trên GPU (câu độ dài gần nhau → không phí frame chờ câu dài nhất) ──
+    raw: dict[int, bytes] = {}
+    for grp in _lo_theo_do_dai(todo, max(1, backend.batch_size)):
         if should_cancel():
             raise JobCancelledError()
 
-        lo = todo[vi_tri : vi_tri + co_lo]
-        vi_tri += co_lo
-
+        lo = [todo[k] for k in grp]
         try:
             pcms = backend.synthesize_batch([seg.text_vi for _, seg in lo], voice_id)
         except QuotaExhaustedError:
-            warnings.append(QuotaExhaustedError.user_message)
+            quota_hit = True
             failed += len(lo)
+            xong += len(lo)
             continue
         except Exception as exc:
             log.warning("Lô %d lượt thoại hỏng (%s) — đọc lại từng câu một", len(lo), exc)
@@ -286,26 +313,46 @@ def _synthesize_theo_lo(
             # Lượt xấu (lỗ hổng im lặng bất thường) hiếm — đọc lại RIÊNG câu đó, không đọc lại cả lô.
             if resynthesize_bad and longest_internal_silence(pcm_to_array(pcm)) > _MAX_INTERNAL_SILENCE:
                 pcm = _draw_without_hole(lambda t: backend.synthesize(t, voice_id), seg.text_vi)
-            try:
-                samples, overflow = _fit_one(
-                    seg, pcm, max_speedup,
-                    _allowed_window(segments, index, total_duration, next_utterance_start),
-                    fill_slowdown,
-                )
-            except Exception as exc:
-                log.warning("Không dựng được lượt thoại %d: %s", index, exc)
-                failed += 1
-                continue
-
-            results[index] = samples
-            # Phụ đề bám theo thời lượng đọc thật, không theo khung thời gian gốc.
-            segments[index].spoken_duration = duration_of(samples)
-            if overflow > _OVERFLOW_WARN_SECONDS:
-                overflowed += 1
+            raw[index] = pcm
 
         progress("synthesize", (progress_base + xong) / max(1, grand_total),
                  f"Đang đọc lượt thoại {progress_base + xong}/{grand_total}")
 
+    if should_cancel():
+        raise JobCancelledError()
+
+    # ── ÉP KHUNG song song: mỗi _fit_one gọi ffmpeg atempo (thả GIL) — đa luồng ăn thật.
+    # Đo: 267 lượt ép tuần tự 12,5s → song song còn ~2s. Kết quả gom lại đúng thứ tự index.
+    results: dict[int, np.ndarray] = {}
+    overflowed = 0
+
+    def _do_fit(item: tuple[int, bytes]):
+        index, pcm = item
+        try:
+            samples, overflow = _fit_one(
+                segments[index], pcm, max_speedup,
+                _allowed_window(segments, index, total_duration, next_utterance_start),
+                fill_slowdown,
+            )
+            return index, samples, overflow
+        except Exception as exc:
+            log.warning("Không dựng được lượt thoại %d: %s", index, exc)
+            return index, None, 0.0
+
+    if raw:
+        with ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 4))) as pool:
+            for index, samples, overflow in pool.map(_do_fit, list(raw.items())):
+                if samples is None:
+                    failed += 1
+                    continue
+                results[index] = samples
+                # Phụ đề bám theo thời lượng đọc thật, không theo khung thời gian gốc.
+                segments[index].spoken_duration = duration_of(samples)
+                if overflow > _OVERFLOW_WARN_SECONDS:
+                    overflowed += 1
+
+    if quota_hit:
+        warnings.append(QuotaExhaustedError.user_message)
     if failed:
         warnings.append(f"{failed}/{len(todo)} lượt thoại không tạo được giọng đọc và đã bị bỏ trống.")
     if overflowed:

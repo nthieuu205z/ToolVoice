@@ -27,6 +27,11 @@ async def _lifespan(app: FastAPI):
         vieneu_speech.configure(batch_size=settings.vieneu_batch_size)
         # VieNeu nạp mất ~15–90 giây lần lạnh — nạp nền từ lúc boot để job đầu khỏi chờ.
         vieneu_speech.prewarm()
+    if settings.stt_provider == "whisper":
+        from pipeline import whisper_stt
+
+        # Whisper nạp mất ~11s lần lạnh — nạp nền song song để bước "quét" job đầu khỏi chờ.
+        whisper_stt.prewarm(settings.whisper_model, settings.whisper_compute_type)
     yield
 
 

@@ -215,7 +215,10 @@ def synthesize_batch(v3turbo, texts: list[str], voice: str, style: str, *,
     if not phang:
         return [np.array([], dtype=np.float32) for _ in texts]
 
-    # Sinh theo từng lô rồi giải mã.
+    # Sinh theo từng lô rồi giải mã TỪNG CÂU. Không gộp lô phần giải mã: codec dựng tensor
+    # audio (B, C, T) đệm về câu dài nhất — với câu dài/nhiều câu là hàng chục GB, tràn VRAM
+    # (đo thật: gộp lô đòi 27 GB trên card 12 GB → tràn). Giải mã từng câu chỉ ~9s/280 câu,
+    # không phải nút cổ chai (nút nằm ở vòng sinh, xem _lo_theo_do_dai bên pipeline/tts.py).
     wavs: list[np.ndarray] = []
     for i in range(0, len(phang), batch_size):
         lo = phang[i : i + batch_size]
