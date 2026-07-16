@@ -27,7 +27,7 @@ def stub_stages(monkeypatch, tmp_path):
                         lambda path: (np.zeros(16000, dtype="<i2"), 16000))
     monkeypatch.setattr(runner, "plan_utterances", lambda *a, **k: [Region(0.0, 1.0)])
     monkeypatch.setattr(runner, "transcribe_regions", lambda *a, **k: ("en", segments, []))
-    monkeypatch.setattr(runner, "translate_segments", lambda b, s, p, c: segments)
+    monkeypatch.setattr(runner, "translate_segments", lambda b, s, p, c, **k: segments)
     monkeypatch.setattr(runner, "synthesize_segments", lambda *a, **k: ([], []))
     monkeypatch.setattr(runner, "build_srt", lambda segs: "")
     monkeypatch.setattr(runner, "build_audio_track", lambda fitted, dur, dest: dest)

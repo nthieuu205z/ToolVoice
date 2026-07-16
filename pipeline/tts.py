@@ -7,7 +7,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 
-from .audio import duration_of, fit_to_window, pcm_to_array, truncate_with_fade
+from .audio import (
+    duration_of,
+    fit_to_window,
+    longest_internal_silence,
+    pcm_to_array,
+    truncate_with_fade,
+)
 from .errors import JobCancelledError, QuotaExhaustedError
 from .models import CancelFn, GeminiBackend, ProgressFn, Segment, never_cancel, noop_progress
 
@@ -33,6 +39,31 @@ _RUNAWAY_HEADROOM_SECONDS = 1.0
 # sạch hai loại — câu ngắn thật sống, còn "Và"→8s vẫn bị cắt.
 _RUNAWAY_MIN_SECONDS = 4.0
 
+# Lỗ hổng im lặng dài hơn mức này ở GIỮA một lượt đọc là bất thường (VieNeu rút phải mẫu
+# xấu), không phải nghỉ lấy hơi giữa câu (~0,4–0,9s đo thật). Đọc lại tối đa _RESYNTH_ATTEMPTS
+# lần, giữ bản có lỗ hổng nhỏ nhất. Chỉ bật cho backend chạy local (đọc lại không tốn gì);
+# Gemini TTS tính tiền theo lượt nên để tắt.
+_MAX_INTERNAL_SILENCE = 1.3
+_RESYNTH_ATTEMPTS = 2
+
+
+def _draw_without_hole(synth, text: str) -> bytes:
+    """Đọc `text`; nếu audio có lỗ hổng im lặng bất thường thì đọc lại, giữ bản sạch nhất.
+
+    `synth` là hàm text→pcm đã chốt sẵn voice_id. VieNeu ngẫu nhiên nên lần đọc lại
+    thường không dính lại đúng lỗ hổng đó; giữ bản có khoảng lặng giữa câu nhỏ nhất.
+    """
+    best = synth(text)
+    best_gap = longest_internal_silence(pcm_to_array(best)) if best else 0.0
+    for _ in range(_RESYNTH_ATTEMPTS):
+        if best_gap <= _MAX_INTERNAL_SILENCE:
+            break
+        cand = synth(text)
+        gap = longest_internal_silence(pcm_to_array(cand)) if cand else float("inf")
+        if gap < best_gap:
+            best, best_gap = cand, gap
+    return best
+
 
 def synthesize_segments(
     backend: GeminiBackend,
@@ -43,6 +74,8 @@ def synthesize_segments(
     max_speedup: float = 1.5,
     total_duration: float | None = None,
     next_utterance_start: float | None = None,
+    resynthesize_bad: bool = False,
+    fill_slowdown: float = 1.0,
     progress: ProgressFn = noop_progress,
     should_cancel: CancelFn = never_cancel,
     progress_base: int = 0,
@@ -78,6 +111,7 @@ def synthesize_segments(
         return _synthesize_theo_lo(
             backend, segments, todo, voice_id, max_speedup=max_speedup,
             total_duration=total_duration, next_utterance_start=next_utterance_start,
+            resynthesize_bad=resynthesize_bad, fill_slowdown=fill_slowdown,
             progress=progress, should_cancel=should_cancel,
             progress_base=progress_base, grand_total=grand_total,
         )
@@ -86,7 +120,8 @@ def synthesize_segments(
         futures = {
             pool.submit(_render_one, backend, seg, voice_id, max_speedup,
                         _allowed_window(segments, i, total_duration,
-                                        next_utterance_start)): (i, seg)
+                                        next_utterance_start), resynthesize_bad,
+                        fill_slowdown): (i, seg)
             for i, seg in todo
         }
         for done, future in enumerate(as_completed(futures), start=1):
@@ -155,7 +190,7 @@ def _allowed_window(segments: list[Segment], index: int, total_duration: float |
 
 
 def _fit_one(seg: Segment, pcm: bytes, max_speedup: float,
-             allowed_duration: float) -> tuple[np.ndarray, float]:
+             allowed_duration: float, fill_slowdown: float = 1.0) -> tuple[np.ndarray, float]:
     """Chống chạy hoang rồi nhét lời thoại vừa khung thời gian. Dùng chung cho cả hai đường."""
     samples = pcm_to_array(pcm)
 
@@ -168,19 +203,23 @@ def _fit_one(seg: Segment, pcm: bytes, max_speedup: float,
                     duration_of(samples), len(seg.text_vi), seg.text_vi, sane)
         samples = truncate_with_fade(samples, sane)
 
-    return fit_to_window(samples, seg.duration, allowed_duration, max_speedup)
+    return fit_to_window(samples, seg.duration, allowed_duration, max_speedup,
+                         fill_slowdown=fill_slowdown)
 
 
 def _render_one(
     backend: GeminiBackend, seg: Segment, voice_id: str, max_speedup: float,
-    allowed_duration: float,
+    allowed_duration: float, resynthesize_bad: bool = False, fill_slowdown: float = 1.0,
 ) -> tuple[np.ndarray, float]:
-    """Gọi TTS đúng MỘT lần — tenacity bên trong GeminiRunner đã lo việc thử lại.
-
-    Gọi lại mù ở đây từng nhân đôi mọi request và làm cạn hạn mức nhanh gấp đôi.
+    """Gọi TTS một lần cho câu bình thường — tenacity bên trong GeminiRunner lo việc thử
+    lại khi LỖI. Chỉ khi bật `resynthesize_bad` (backend local, miễn phí) và phát hiện
+    lỗ hổng im lặng bất thường mới đọc lại vì CHẤT LƯỢNG — không phải gọi lại mù.
     """
-    pcm = backend.synthesize(seg.text_vi, voice_id)
-    return _fit_one(seg, pcm, max_speedup, allowed_duration)
+    if resynthesize_bad:
+        pcm = _draw_without_hole(lambda t: backend.synthesize(t, voice_id), seg.text_vi)
+    else:
+        pcm = backend.synthesize(seg.text_vi, voice_id)
+    return _fit_one(seg, pcm, max_speedup, allowed_duration, fill_slowdown)
 
 
 def _chia_lo(so_luong: int, tran: int) -> list[int]:
@@ -200,7 +239,8 @@ def _chia_lo(so_luong: int, tran: int) -> list[int]:
 def _synthesize_theo_lo(
     backend: GeminiBackend, segments: list[Segment], todo: list[tuple[int, Segment]],
     voice_id: str, *, max_speedup: float, total_duration: float | None,
-    next_utterance_start: float | None, progress: ProgressFn, should_cancel: CancelFn,
+    next_utterance_start: float | None, resynthesize_bad: bool, fill_slowdown: float,
+    progress: ProgressFn, should_cancel: CancelFn,
     progress_base: int, grand_total: int,
 ) -> tuple[list[tuple[Segment, np.ndarray]], list[str]]:
     """Đọc cả lô một lượt trên GPU. Giữ nguyên hai lời hứa của đường cũ:
@@ -243,10 +283,14 @@ def _synthesize_theo_lo(
             if not pcm:
                 failed += 1
                 continue
+            # Lượt xấu (lỗ hổng im lặng bất thường) hiếm — đọc lại RIÊNG câu đó, không đọc lại cả lô.
+            if resynthesize_bad and longest_internal_silence(pcm_to_array(pcm)) > _MAX_INTERNAL_SILENCE:
+                pcm = _draw_without_hole(lambda t: backend.synthesize(t, voice_id), seg.text_vi)
             try:
                 samples, overflow = _fit_one(
                     seg, pcm, max_speedup,
                     _allowed_window(segments, index, total_duration, next_utterance_start),
+                    fill_slowdown,
                 )
             except Exception as exc:
                 log.warning("Không dựng được lượt thoại %d: %s", index, exc)

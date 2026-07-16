@@ -124,6 +124,39 @@ def _get_pipeline(model):
     return BatchedInferencePipeline(model=model)
 
 
+_SENTENCE_END = (".", "!", "?", "…")
+
+
+def sentences_from_words(
+    words: list[tuple[float, float, str]],
+) -> list[tuple[float, float, str]]:
+    """Gom các TỪ (start, end, text) của Whisper thành CÂU, cắt sau từ kết bằng .!?…
+
+    Trả về [(start_câu, end_câu, văn_bản)]. Mốc câu = mốc từ đầu → mốc từ cuối của câu, là
+    mốc căn chỉnh thật của Whisper. Câu cuối chưa có dấu kết vẫn được trả (mảnh dang dở) —
+    merge_sentence_fragments sẽ ghép nó với mảnh mở của vùng kế. Nhờ tách theo câu, mỗi câu
+    thành một lượt đọc VieNeu riêng (ổn định hơn), đặt đúng thời điểm câu tiếng Anh.
+    """
+    sentences: list[tuple[float, float, str]] = []
+    parts: list[str] = []
+    start: float | None = None
+    end = 0.0
+    for w_start, w_end, w_text in words:
+        token = w_text.strip()
+        if not token:
+            continue
+        if start is None:
+            start = w_start
+        parts.append(token)
+        end = w_end
+        if token.endswith(_SENTENCE_END):
+            sentences.append((start, end, " ".join(parts)))
+            parts, start = [], None
+    if parts and start is not None:
+        sentences.append((start, end, " ".join(parts)))
+    return sentences
+
+
 def _vung_chua(regions: list, boundaries: list[tuple[float, float]], start: float,
                end: float) -> int | None:
     """Vùng nào chồng lấn nhiều nhất với [start, end]. None nếu không chồng vào đâu.
@@ -153,6 +186,13 @@ class WhisperTranscriber:
     @property
     def stt_batch_size(self) -> int:
         return batch_size()
+
+    @property
+    def stt_timed(self) -> bool:
+        """Mốc thời gian cấp CÂU chỉ có ở đường gộp lô (GPU) qua BatchedInferencePipeline.
+        Trên CPU (từng vùng một) ta không lấy được mốc con → để pipeline lùi về cấp vùng.
+        """
+        return batch_size() > 0
 
     def _chep(self, wav_path: Path) -> tuple[str, str]:
         model = _get_model(self._model_name, self._compute_type)
@@ -213,3 +253,46 @@ class WhisperTranscriber:
 
         lang = info.language or ""
         return [(lang, " ".join(c).strip()) for c in chu]
+
+    def transcribe_batch_timed(
+        self, samples, rate: int, regions: list,
+    ) -> tuple[str, list[tuple[float, float, str]]]:
+        """Như transcribe_batch nhưng GIỮ mốc thời gian cấp CÂU của Whisper.
+
+        Với clip_timestamps, Whisper trả về MỘT segment cho mỗi vùng (không tự tách câu).
+        Nên ta bật `word_timestamps=True` lấy mốc từng TỪ rồi tự tách câu theo dấu chấm câu
+        (xem sentences_from_words) — cho mốc câu THẬT bên trong vùng. Mỗi câu → một Segment
+        đặt đúng thời điểm, để VieNeu đọc từng câu (ổn định) và bám hình sát. Vùng ffmpeg
+        vẫn lo THỜI GIAN THÔ (clip_timestamps ràng buộc Whisper chỉ chép chỗ có tiếng).
+        """
+        import numpy as np
+
+        model = _get_model(self._model_name, self._compute_type)
+        pipe = _get_pipeline(model)
+        audio = np.asarray(samples, dtype="float32") / 32768.0
+
+        moc = [{"start": r.start, "end": r.end} for r in regions]
+        bien = [(r.start, r.end) for r in regions]
+
+        try:
+            with _infer_lock:
+                segments, info = pipe.transcribe(audio, clip_timestamps=moc,
+                                                 batch_size=batch_size(),
+                                                 word_timestamps=True)
+                pieces: list[tuple[float, float, str]] = []
+                for seg in segments:
+                    words = [(float(w.start), float(w.end), w.word)
+                             for w in (getattr(seg, "words", None) or [])]
+                    # Không có mốc từ (hiếm) → giữ cả segment làm một câu, đừng bỏ lời thoại.
+                    cau = sentences_from_words(words) if words else (
+                        [(float(seg.start), float(seg.end), seg.text.strip())]
+                        if seg.text.strip() else [])
+                    for s, e, t in cau:
+                        if t.strip() and _vung_chua(regions, bien, s, e) is not None:
+                            pieces.append((s, e, t.strip()))
+        except Exception as exc:
+            if _thiet_bi()[0] == "cuda":
+                _loai_gpu(exc)
+            raise
+
+        return info.language or "", pieces

@@ -100,6 +100,14 @@ class CompositeBackend:
     def transcribe_batch(self, samples, rate: int, regions: list) -> list[tuple[str, str]]:
         return self._recognizer.transcribe_batch(samples, rate, regions)
 
+    @property
+    def stt_timed(self) -> bool:
+        """True = nhận diện này trả về mốc thời gian cấp CÂU (Whisper/GPU), để đặt câu bám hình."""
+        return getattr(self._recognizer, "stt_timed", False)
+
+    def transcribe_batch_timed(self, samples, rate: int, regions: list):
+        return self._recognizer.transcribe_batch_timed(samples, rate, regions)
+
 
 def build_backend(config: ProviderConfig) -> CompositeBackend:
     """Import muộn từng nhà cung cấp để không kéo phụ thuộc nặng khi không dùng tới."""

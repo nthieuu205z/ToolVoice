@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pipeline.audio import duration_of, fit_to_slot, parse_pcm_rate, pcm_to_array
+from pipeline.audio import duration_of, fit_to_slot, fit_to_window, parse_pcm_rate, pcm_to_array
 from pipeline.errors import QuotaExhaustedError
 from pipeline.models import Segment
 from pipeline.tts import synthesize_segments
@@ -118,6 +118,41 @@ def test_lower_max_speedup_reads_a_dense_utterance_more_gently():
     assert abs(duration_of(at_13) - 6.0 / 1.3) < 0.2      # ~4,6s — chậm hơn, ít "nhanh" hơn
     assert duration_of(at_13) > duration_of(at_15)        # cap thấp => đọc êm hơn
     assert ov_13 > ov_15                                  # đánh đổi: tràn nhiều hơn (drift)
+
+
+# ─── lấp nhẹ để bám hình (chống "nói nhanh hơn hình, xong sớm") ───
+
+def test_short_audio_is_gently_slowed_to_track_the_picture_when_fill_enabled():
+    """Tiếng Việt đọc nhanh hơn tiếng Anh nên hay xong sớm hơn khung. Kéo giãn NHẸ
+    (tối đa tới sàn 0,9×, tai không nhận ra) để bám hình thay vì để im lặng cụt lủn."""
+    samples = pcm_to_array(sine_pcm(4.0))
+    filled, overflow = fit_to_window(samples, slot_duration=6.0, window_duration=6.0,
+                                     max_speedup=1.3, fill_slowdown=0.9)
+    assert abs(duration_of(filled) - 4.0 / 0.9) < 0.15   # 4s ở 0,9× ≈ 4,44s
+    assert overflow == 0.0
+
+
+def test_fill_is_disabled_by_default_so_short_audio_is_left_untouched():
+    """Mặc định giữ hành vi cũ: không kéo chậm, để im lặng — chỉ bật khi runner truyền sàn."""
+    samples = pcm_to_array(sine_pcm(4.0))
+    filled, _ = fit_to_window(samples, slot_duration=6.0, window_duration=6.0, max_speedup=1.3)
+    assert len(filled) == len(samples)
+
+
+def test_fill_never_slows_below_the_floor_so_the_voice_stays_natural():
+    """Câu rất ngắn so với khung: chỉ kéo chậm tối đa tới sàn, không kéo tới lấp kín khung."""
+    samples = pcm_to_array(sine_pcm(2.0))
+    filled, _ = fit_to_window(samples, slot_duration=10.0, window_duration=10.0,
+                              max_speedup=1.3, fill_slowdown=0.9)
+    assert abs(duration_of(filled) - 2.0 / 0.9) < 0.1    # đúng sàn 0,9×, không hơn
+
+
+def test_audio_that_already_fills_its_slot_is_not_slowed():
+    """Chỉ lấp khi audio NGẮN hơn khung; audio vừa/đủ khung không bị đụng."""
+    samples = pcm_to_array(sine_pcm(6.0))
+    filled, _ = fit_to_window(samples, slot_duration=6.0, window_duration=6.0,
+                              max_speedup=1.3, fill_slowdown=0.9)
+    assert len(filled) == len(samples)
 
 
 def test_the_last_segment_may_run_to_the_end_of_the_video():

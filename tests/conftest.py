@@ -18,6 +18,18 @@ def sine_pcm(duration: float, freq: float = 220.0, rate: int = TTS_SAMPLE_RATE) 
     return struct.pack(f"<{count}h", *samples)
 
 
+def sine_pcm_with_hole(pre: float = 1.0, hole: float = 2.5, post: float = 1.0,
+                       rate: int = TTS_SAMPLE_RATE) -> bytes:
+    """PCM có tiếng — khoảng lặng dài bất thường ở GIỮA — rồi lại tiếng.
+
+    Mô phỏng đúng "lá bài xấu" của VieNeu: một lượt đọc dài bình thường nhưng có lỗ
+    hổng im lặng ~2,5s ở giữa (đo thật: 4,72s ở bản render). Bộ chống chạy hoang cũ mù
+    với ca này vì tổng độ dài vẫn hợp lý.
+    """
+    quiet = struct.pack(f"<{int(hole * rate)}h", *([0] * int(hole * rate)))
+    return sine_pcm(pre, rate=rate) + quiet + sine_pcm(post, rate=rate)
+
+
 class FakeGemini:
     """Bám đúng giao thức GeminiBackend, có thể lập trình để mô phỏng lỗi."""
 
@@ -30,6 +42,7 @@ class FakeGemini:
         tts_duration: float | None = None,
         fail_tts_for: set[str] | None = None,
         tts_error: Exception | None = None,
+        hole_first_for: set[str] | None = None,
     ):
         # Văn bản trả về cho từng vùng, theo thứ tự được gọi. Thiếu thì lặp phần tử cuối.
         self.clips = clips
@@ -39,6 +52,8 @@ class FakeGemini:
         self.tts_duration = tts_duration
         self.fail_tts_for = fail_tts_for or set()
         self.tts_error = tts_error
+        # Lượt đọc ĐẦU cho các câu này trả về audio có lỗ hổng im lặng (mẫu xấu); lượt sau sạch.
+        self.hole_first_for = hole_first_for or set()
 
         self.transcribe_calls: list[Path] = []
         self.translate_calls: list[tuple[list[str], list[float], str]] = []
@@ -68,11 +83,14 @@ class FakeGemini:
         return [f"[vi] {t}" for t in texts]
 
     def synthesize(self, text: str, voice_id: str) -> bytes:
+        prior = self.synthesize_calls.count((text, voice_id))
         self.synthesize_calls.append((text, voice_id))
         if self.tts_error is not None:
             raise self.tts_error
         if text in self.fail_tts_for:
             raise RuntimeError(f"TTS hỏng với: {text}")
+        if text in self.hole_first_for and prior == 0:
+            return sine_pcm_with_hole()   # lượt đọc đầu: mẫu xấu có lỗ hổng
         return sine_pcm(self.tts_duration if self.tts_duration is not None else 1.0)
 
 

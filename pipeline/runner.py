@@ -35,9 +35,16 @@ class PipelineOptions:
     voice_id: str
     max_utterance_seconds: float = 12.0
     max_utterance_gap: float = 0.5
+    # Đặt câu theo mốc thời gian cấp câu của Whisper (bám hình sát hơn). Mặc định True;
+    # CLI/test không có backend timed thì tự lùi về cấp vùng nên bật sẵn cũng an toàn.
+    sentence_level_timing: bool = True
     stt_workers: int = 4
     tts_workers: int = 4
+    translate_workers: int = 6
     tts_max_speedup: float = 1.5
+    # Sàn kéo-chậm để lấp khung khi tiếng Việt xong sớm hơn hình. 1,0 = tắt (mặc định,
+    # giữ hành vi cũ cho CLI/test); backend web truyền settings.tts_fill_slowdown (0,9).
+    tts_fill_slowdown: float = 1.0
     # Bản miễn phí cho khoảng 100 lượt TTS mỗi ngày; cảnh báo sớm khi sắp chạm trần.
     # Chỉ có nghĩa với Gemini TTS — VieNeu/edge chạy không giới hạn nên tts_is_metered=False.
     tts_daily_budget: int = 90
@@ -86,7 +93,8 @@ def run_pipeline(
     log.info("ffmpeg tìm thấy %d lượt phát ngôn", len(regions))
     language, segments, stt_warnings = transcribe_regions(
         backend, samples, rate, regions, workdir,
-        workers=options.stt_workers, progress=progress, should_cancel=should_cancel,
+        workers=options.stt_workers, sentence_level=options.sentence_level_timing,
+        progress=progress, should_cancel=should_cancel,
     )
     warnings.extend(stt_warnings)
 
@@ -95,8 +103,9 @@ def run_pipeline(
     # dịch đúng cả câu, và hết cảnh "Hôm ...(nghỉ)... nay".
     segments = merge_sentence_fragments(segments, options.max_utterance_seconds)
 
-    # 3. Dịch
-    segments = translate_segments(backend, segments, progress, should_cancel)
+    # 3. Dịch (các lô chạy song song — xem pipeline/translate.py)
+    segments = translate_segments(backend, segments, progress, should_cancel,
+                                  workers=options.translate_workers)
 
     # 4. Tạo giọng đọc
     attempted = sum(1 for seg in segments if seg.text_vi.strip())
@@ -111,6 +120,10 @@ def run_pipeline(
         workers=options.tts_workers,
         max_speedup=options.tts_max_speedup,
         total_duration=media.duration,
+        # Đọc lại lượt có lỗ hổng im lặng bất thường — chỉ với backend local (miễn phí);
+        # Gemini TTS tính tiền theo lượt nên không đọc lại.
+        resynthesize_bad=not options.tts_is_metered,
+        fill_slowdown=options.tts_fill_slowdown,
         progress=progress,
         should_cancel=should_cancel,
     )

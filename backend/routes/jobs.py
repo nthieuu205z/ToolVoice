@@ -58,9 +58,12 @@ async def create_job(video: UploadFile = File(...), voice_id: str = Form(...)) -
         voice_id=voice_id,
         max_utterance_seconds=settings.max_utterance_seconds,
         max_utterance_gap=settings.max_utterance_gap,
+        sentence_level_timing=settings.sentence_level_timing,
         stt_workers=settings.stt_workers,
         tts_workers=settings.tts_workers,
+        translate_workers=settings.translate_workers,
         tts_max_speedup=settings.tts_max_speedup,
+        tts_fill_slowdown=settings.tts_fill_slowdown,
         tts_daily_budget=settings.tts_daily_budget,
         tts_is_metered=settings.tts_provider == "gemini",
     )

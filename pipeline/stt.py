@@ -61,6 +61,7 @@ def transcribe_regions(
     workdir: Path,
     *,
     workers: int = 4,
+    sentence_level: bool = True,
     progress: ProgressFn = noop_progress,
     should_cancel: CancelFn = never_cancel,
     progress_base: int = 0,
@@ -78,6 +79,18 @@ def transcribe_regions(
     if not regions:
         raise NoSpeechDetectedError()
     grand_total = progress_total if progress_total is not None else len(regions)
+
+    # Whisper/GPU trả về mốc thời gian cấp CÂU: mỗi câu thành một Segment đặt đúng thời điểm
+    # câu tiếng Anh, thay vì nhồi cả vùng ffmpeg (2–4 câu) làm một khối rồi đặt tại một mốc.
+    # Đây là gốc rễ của việc bám hình sát và hết cảnh "Hôm ...(nghỉ)... nay" (xem
+    # merge_sentence_fragments ghép nốt câu bị vùng chẻ đôi). Vùng ffmpeg vẫn ràng buộc
+    # Whisper chỉ được chép trong chỗ CÓ tiếng — nó lo THỜI GIAN THÔ, Whisper tinh mốc câu.
+    if sentence_level and getattr(backend, "stt_timed", False):
+        return _transcribe_timed_theo_lo(
+            backend, samples, rate, regions,
+            progress=progress, should_cancel=should_cancel,
+            progress_base=progress_base, grand_total=grand_total,
+        )
 
     # Whisper trên GPU chép cả lô trong một lượt gọi — nhanh gấp 9,4 lần so với từng vùng
     # một (xem pipeline/whisper_stt.py::batch_size). Backend nào không gộp được trả về 0.
@@ -219,6 +232,71 @@ def _transcribe_theo_lo(
 
     progress("transcribe", min(1.0, (progress_base + len(regions)) / max(1, grand_total)),
              f"Đã nhận diện {len(segments)} lượt thoại")
+    if not segments:
+        raise NoSpeechDetectedError()
+    return language, segments, warnings
+
+
+def _transcribe_timed_theo_lo(
+    backend: GeminiBackend, samples: np.ndarray, rate: int, regions: list[Region], *,
+    progress: ProgressFn, should_cancel: CancelFn, progress_base: int, grand_total: int,
+) -> tuple[str, list[Segment], list[str]]:
+    """Chép cả lô lấy mốc thời gian cấp CÂU. Mỗi mảnh câu Whisper trả về → một Segment
+    đặt đúng thời điểm câu tiếng Anh (không nhồi cả vùng làm một khối). Giữ hai lời hứa:
+
+    - Hủy giữa chừng còn ăn: kiểm tra trước mỗi lô.
+    - Lô hỏng không giết cả video: lùi về chép CẢ VÙNG (mất mốc con nhưng vẫn có lời thoại).
+    """
+    pieces: list[tuple[float, float, str]] = []
+    language = ""
+    lost: list[int] = []
+    xong = 0
+    vi_tri = 0
+
+    for co_lo in _chia_lo(len(regions), backend.stt_batch_size):
+        if should_cancel():
+            raise JobCancelledError()
+
+        lo = regions[vi_tri : vi_tri + co_lo]
+        goc = vi_tri
+        vi_tri += co_lo
+
+        try:
+            lang, ra = backend.transcribe_batch_timed(samples, rate, lo)
+            language = language or lang
+            pieces.extend(ra)
+        except Exception as exc:
+            log.warning("Lô %d vùng lấy mốc câu hỏng (%s) — lùi về chép cả vùng", len(lo), exc)
+            for offset, r in enumerate(lo):
+                try:
+                    lang, text = _transcribe_mot_vung(backend, samples, rate, r)
+                    language = language or lang
+                    if text.strip():
+                        pieces.append((r.start, r.end, text.strip()))
+                    else:
+                        lost.append(goc + offset)
+                except Exception as le:
+                    log.warning("Vùng quanh mốc %.0fs hỏng cả lần lùi: %s", r.start, le)
+                    lost.append(goc + offset)
+
+        xong += co_lo
+        progress("transcribe", (progress_base + xong) / max(1, grand_total),
+                 f"Nhận diện đoạn {progress_base + xong}/{grand_total}")
+
+    pieces = [p for p in pieces if p[2].strip()]
+    pieces.sort(key=lambda p: p[0])
+    segments = [Segment(start=s, end=e, text=t.strip()) for s, e, t in pieces]
+
+    warnings: list[str] = []
+    if len(lost) > max(3, len(regions) // 10):
+        spots = ", ".join(f"{regions[i].start:.0f}s" for i in lost[:5])
+        warnings.append(
+            f"{len(lost)} đoạn không nhận diện được (quanh mốc {spots}) — "
+            "các đoạn này sẽ thiếu lời thoại. Chạy lại video thường khắc phục được."
+        )
+
+    progress("transcribe", min(1.0, (progress_base + len(regions)) / max(1, grand_total)),
+             f"Đã nhận diện {len(segments)} câu")
     if not segments:
         raise NoSpeechDetectedError()
     return language, segments, warnings

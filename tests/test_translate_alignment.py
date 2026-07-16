@@ -67,15 +67,55 @@ def test_long_transcript_is_translated_in_batches():
     backend = FakeGemini()
     translate_segments(backend, segments(total))
 
+    # Các lô chạy SONG SONG nên thứ tự gọi không cố định — kiểm theo tập kích thước.
     assert len(backend.translate_calls) == 2
-    assert len(backend.translate_calls[0][0]) == BATCH_SIZE
-    assert len(backend.translate_calls[1][0]) == 10
+    assert sorted(len(c[0]) for c in backend.translate_calls) == [10, BATCH_SIZE]
 
 
-def test_later_batches_receive_previous_lines_as_context():
+def test_batches_take_the_preceding_SOURCE_lines_as_context_so_they_are_independent():
+    """Ngữ cảnh lấy từ lời GỐC (English), không từ bản dịch — nhờ vậy các lô độc lập,
+    dịch song song được. Model vẫn thấy nguyên văn nội dung ngay trước để dịch nhất quán.
+    """
     from pipeline.translate import BATCH_SIZE
 
     backend = FakeGemini()
     translate_segments(backend, segments(BATCH_SIZE + 1))
-    assert backend.translate_calls[0][2] == ""
-    assert "[vi] line" in backend.translate_calls[1][2]
+    first = next(c for c in backend.translate_calls if len(c[0]) == BATCH_SIZE)   # lô đầu
+    later = next(c for c in backend.translate_calls if len(c[0]) == 1)            # lô sau
+    assert first[2] == ""                     # lô đầu: không có gì trước nó
+    assert "line" in later[2]                 # lô sau: có lời gốc ngay trước
+    assert "[vi]" not in later[2]             # KHÔNG phải bản dịch (nếu là dịch sẽ có "[vi]")
+
+
+def test_batches_are_translated_in_parallel_and_results_stay_in_order():
+    """Song song để nhanh (đo thật: 64s tuần tự → 11s song song), nhưng KẾT QUẢ phải đúng
+    thứ tự segment — lệch một dòng là lệch giờ toàn bộ phía sau."""
+    import threading
+    import time
+
+    from pipeline.translate import BATCH_SIZE
+
+    class Probe(FakeGemini):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.active = 0
+            self.peak = 0
+            self._lk = threading.Lock()
+
+        def translate(self, texts, durations, context=""):
+            with self._lk:
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+            time.sleep(0.15)
+            try:
+                return super().translate(texts, durations, context)
+            finally:
+                with self._lk:
+                    self.active -= 1
+
+    backend = Probe()
+    result = translate_segments(backend, segments(BATCH_SIZE * 3), workers=3)
+
+    assert backend.peak >= 2                                        # thật sự chạy song song
+    assert [s.text_vi for s in result[:3]] == ["[vi] line 0", "[vi] line 1", "[vi] line 2"]
+    assert result[-1].text_vi == f"[vi] line {BATCH_SIZE * 3 - 1}"  # cuối cùng vẫn đúng chỗ

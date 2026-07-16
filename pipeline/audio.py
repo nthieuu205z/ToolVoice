@@ -153,9 +153,14 @@ COMFORT_SPEEDUP = 1.15
 
 def fit_to_window(samples: np.ndarray, slot_duration: float, window_duration: float,
                   max_speedup: float, comfort_speedup: float = COMFORT_SPEEDUP,
+                  fill_slowdown: float = 1.0,
                   rate: int = TTS_SAMPLE_RATE) -> tuple[np.ndarray, float]:
-    """Ép lời thoại theo ba nấc, ưu tiên bám mốc câu gốc mà không làm méo giọng:
+    """Ép lời thoại theo các nấc, ưu tiên bám mốc câu gốc mà không làm méo giọng:
 
+    0. Ngắn hơn khung gốc → kéo giãn NHẸ để bám hình (`fill_slowdown` là tốc độ tối thiểu,
+       vd 0,9× ≈ dài thêm 11%, dưới ngưỡng tai). Tiếng Việt đọc nhanh hơn tiếng Anh nên
+       hay xong sớm hơn khung; lấp nhẹ thay vì để im lặng cụt lủn. `fill_slowdown=1.0`
+       (mặc định) = tắt, giữ nguyên hành vi cũ.
     1. Vừa khung gốc (`slot_duration`) → giữ nguyên.
     2. Dài hơn khung → tăng tốc NHẸ (≤ `comfort_speedup`, dưới ngưỡng tai để ý)
        để về sát khung; phần còn dư tràn tự nhiên vào khoảng lặng (`window_duration`
@@ -169,6 +174,11 @@ def fit_to_window(samples: np.ndarray, slot_duration: float, window_duration: fl
     window = max(slot_duration, window_duration)
     actual = duration_of(samples, rate)
     if actual <= slot_duration:
+        # Kéo giãn nhẹ để bám hình, nhưng không bao giờ chậm quá sàn (nghe sẽ lờ đờ).
+        if fill_slowdown < 1.0:
+            speed = max(fill_slowdown, actual / slot_duration)
+            if speed < 0.99:
+                return time_stretch(samples, speed, rate), 0.0
         return samples, 0.0
 
     speed = min(actual / slot_duration, comfort_speedup)
@@ -189,6 +199,39 @@ def truncate_with_fade(samples: np.ndarray, max_duration: float,
     if steps:
         out[-steps:] *= np.linspace(1.0, 0.0, steps)
     return out.astype(samples.dtype)
+
+
+def longest_internal_silence(samples: np.ndarray, rate: int = TTS_SAMPLE_RATE,
+                             frame: float = 0.02, thresh_frac: float = 0.06) -> float:
+    """Khoảng lặng dài nhất NẰM GIỮA phần có tiếng — bỏ qua im lặng đầu/cuối.
+
+    VieNeu là model tự hồi quy có yếu tố ngẫu nhiên: ~1–2% lượt đọc rút phải "lá bài xấu"
+    và chèn một khoảng lặng dài bất thường vào giữa câu (đo thật: lỗ 4,72s), nghe như
+    "ngắt đột ngột". Bộ chống chạy hoang không thấy được vì tổng độ dài vẫn hợp lý — cần
+    đo riêng lỗ hổng bên trong. Ngưỡng năng lượng thích nghi theo chính đoạn audio nên
+    không phụ thuộc âm lượng tuyệt đối.
+    """
+    if len(samples) == 0:
+        return 0.0
+    n = max(1, int(frame * rate))
+    nf = len(samples) // n
+    if nf == 0:
+        return 0.0
+    block = samples[: nf * n].astype(np.float64).reshape(nf, n)
+    rms = np.sqrt((block ** 2).mean(axis=1))
+    peak = float(np.percentile(rms, 95))
+    if peak <= 0:
+        return 0.0
+    voiced = rms > peak * thresh_frac
+    idx = np.flatnonzero(voiced)
+    if len(idx) == 0:
+        return 0.0
+    inner = ~voiced[idx[0] : idx[-1] + 1]   # chỉ xét khoảng giữa tiếng đầu và tiếng cuối
+    longest = run = 0
+    for quiet in inner:
+        run = run + 1 if quiet else 0
+        longest = max(longest, run)
+    return longest * frame
 
 
 def silent_track(duration: float, rate: int = TTS_SAMPLE_RATE) -> np.ndarray:

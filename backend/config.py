@@ -58,16 +58,29 @@ class Settings(BaseSettings):
     # càng ngắn càng bám sát mốc câu gốc (xem pipeline/segmentation.py).
     max_utterance_seconds: float = 12.0
     max_utterance_gap: float = 0.5
+    # Dùng mốc thời gian cấp CÂU của Whisper: mỗi câu là một lượt đọc đặt đúng thời điểm câu
+    # tiếng Anh, thay vì nhồi cả vùng ffmpeg (2–4 câu) làm một khối. Bám hình sát hơn, VieNeu
+    # ổn định hơn (đọc từng câu), hết cảnh "Hôm ...(nghỉ)... nay". Đặt False để về cấp vùng.
+    sentence_level_timing: bool = True
     # Gemini STT chịu được nhiều luồng song song (đặt 8 trong .env); Whisper thì
     # tự tuần tự hóa bên trong nên chạy whisper hãy hạ về 1 cho khỏi tranh CPU.
     stt_workers: int = 1
     # Đo thực nghiệm: edge-tts 6 luồng → 25/32 hỏng; 2 luồng → 10/10.
     tts_workers: int = 2
+    # Số lô dịch chạy song song. Nút cổ chai là model xuất token, không phải CPU — đo thật:
+    # 4 lô tuần tự 63,7s → 6 lô song song ~11s. Vertex chịu được; hạ về 2–3 nếu dùng
+    # Developer API free tier (RPM thấp) để tránh 429.
+    translate_workers: int = 6
     # Trần tăng tốc để ép câu tiếng Việt (dài hơn khe gốc) vừa khung. 1,5× nghe rõ là
     # "nói nhanh"; 1,3× êm hơn hẳn mà timing vẫn khá sát — phần dư tràn sang câu sau rồi
     # tự tan ở khoảng lặng kế tiếp (xem pipeline/audio.py::fit_to_window). Nới lên nếu
     # muốn dub bám hình chặt hơn, hạ xuống nếu muốn giọng êm hơn nữa.
     tts_max_speedup: float = 1.3
+    # Sàn kéo-CHẬM để lấp khung khi tiếng Việt đọc xong sớm hơn hình (VieNeu đọc ~1,6×
+    # nhanh hơn giọng Anh). 0,9× kéo dài thêm tối đa ~11% — dưới ngưỡng tai — để bám hình
+    # thay vì để im lặng cụt lủn. Đặt 1,0 để tắt (giữ hành vi cũ "không bao giờ kéo chậm").
+    # Chỉ áp cho câu NGẮN hơn khung; câu dài vẫn tăng tốc như thường.
+    tts_fill_slowdown: float = 0.9
     tts_daily_budget: int = 90
     max_upload_mb: int = 8192
 
