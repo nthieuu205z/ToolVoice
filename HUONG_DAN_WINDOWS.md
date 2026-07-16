@@ -1,8 +1,9 @@
 # Cài ToolVietSub trên Windows — máy có GPU rời NVIDIA
 
-Hướng dẫn này dành cho laptop/PC Windows 10/11 64-bit có card NVIDIA. GPU chỉ tăng tốc
-đúng **bước tạo giọng đọc VieNeu** (bước nặng nhất, ~80% thời gian xử lý) — các bước khác
-hoặc chạy trên đám mây (nhận diện, dịch) hoặc không re-encode video nên GPU không tham gia.
+Hướng dẫn này dành cho laptop/PC Windows 10/11 64-bit có card NVIDIA. GPU tăng tốc **cả hai
+bước nặng nhất**: **nhận diện giọng nói (Whisper)** và **tạo giọng đọc (VieNeu)** — cả hai
+đều gộp lô trên GPU, cỡ lô tự suy từ VRAM trống. Chỉ bước dịch cần mạng (Gemini). Không có
+GPU thì vẫn chạy được nhưng chậm hơn nhiều (tự lùi về CPU).
 
 ## Cần chuẩn bị
 
@@ -84,10 +85,11 @@ rồi điền `GEMINI_API_KEY`. Cấu hình khuyến nghị (đã là mặc đ�
 
 ```
 GEMINI_BACKEND=vertex        # khóa tạo trong Google Cloud; khóa AI Studio thì để developer
-STT_PROVIDER=gemini          # nhận diện nhanh + chuẩn, 8 luồng song song
-STT_WORKERS=8
-TTS_PROVIDER=vieneu          # 14 giọng ba miền + nhân bản giọng
-MAX_UTTERANCE_SECONDS=12     # hạt đồng bộ hình–tiếng, đừng tăng nếu không có lý do
+STT_PROVIDER=whisper         # nhận diện trên GPU (miễn phí) + cho mốc từng từ để cắt câu
+STT_WORKERS=1                # Whisper tự tuần tự hóa bên trong; để 1 cho khỏi tranh CPU
+TTS_PROVIDER=vieneu          # 14 giọng ba miền + nhân bản giọng, chạy trên GPU
+SENTENCE_LEVEL_TIMING=true   # đọc theo từng câu theo mốc từng từ → bám hình sát
+MAX_UTTERANCE_SECONDS=12     # trần vùng ffmpeg TRƯỚC khi tách câu, đừng tăng nếu không có lý do
 ```
 
 ## 6. Chạy

@@ -6,19 +6,27 @@ Lồng tiếng Việt và tạo phụ đề tiếng Việt cho video, chạy ho�
 - video với âm thanh gốc **được thay hẳn** bằng giọng đọc tiếng Việt
 - file phụ đề `.srt` tiếng Việt riêng
 
-Hai cấu hình chính, đổi qua `.env`:
+Mặc định chạy **hoàn toàn trên máy**, chỉ bước dịch gọi Gemini:
 
-| Bước | Nhanh nhất (Gemini trả phí) | Miễn phí |
+| Bước | Chạy bằng | Ghi chú |
 |---|---|---|
-| Khung thời gian | ffmpeg `silencedetect` — trên máy | như nhau |
-| Nhận diện giọng nói | **Gemini Flash, 8 luồng song song** | Whisper trên máy (chậm, tuần tự) |
-| Dịch | Gemini Flash (1–4 lượt gọi cho cả video) | như nhau |
-| Giọng đọc | VieNeu / edge-tts — trên máy, không giới hạn | như nhau |
+| Khung thời gian | ffmpeg `silencedetect` — trên máy | tìm vùng có tiếng nói |
+| Nhận diện giọng nói | **Whisper trên máy** (GPU nếu có card NVIDIA) | gộp lô GPU ~9× nhanh hơn; lấy mốc TỪNG TỪ để cắt câu |
+| Dịch | **Gemini Flash** (các lô chạy song song) | bước duy nhất cần mạng |
+| Giọng đọc | **VieNeu** trên máy (GPU) / edge-tts | không giới hạn, offline |
 
-Cấu hình nhanh: `STT_PROVIDER=gemini` + `STT_WORKERS=8`. Bước nhận diện gửi từng vùng
-tiếng nói cho Gemini (đã tắt thinking — chép lời không cần suy luận, đo được nhanh gấp
-~2–7 lần mỗi request), video 19 phút nhận diện xong trong ~100 giây thay vì hàng chục phút
-Whisper CPU. Muốn về miễn phí: `STT_PROVIDER=whisper` + `STT_WORKERS=1`.
+Mặc định `STT_PROVIDER=whisper` + `TTS_PROVIDER=vieneu`: không tốn token, không hạn mức,
+và trên GPU thì nhanh — video 19 phút xong **cả** pipeline trong ~2 phút. Chỉ dùng khóa
+Gemini cho bước dịch.
+
+> **Có card NVIDIA?** Whisper và VieNeu tự dùng GPU khi thấy CUDA. Cỡ lô **tự suy ra từ
+> VRAM còn trống** (không ghim cứng), nên cùng một công thức tự ép tối đa mọi loại card:
+> card lớn chạy lô lớn hơn. Không có GPU thì tự lùi về CPU. Windows + GPU: xem
+> [HUONG_DAN_WINDOWS.md](HUONG_DAN_WINDOWS.md).
+
+Vẫn đổi được sang `STT_PROVIDER=gemini` (8 luồng song song, tắt thinking) nếu muốn chép
+lời chuẩn hơn với thuật ngữ và tên riêng — nhưng khi đó **mất mốc từng từ nên tắt việc
+cắt câu** (xem "Đọc theo từng câu" bên dưới), pipeline lùi về đặt cả vùng tại một mốc.
 
 ### Chọn giọng đọc
 
@@ -130,9 +138,9 @@ Bảy bước, chạy tuần tự trong `pipeline/runner.py`:
 | Bước | Việc làm |
 |---|---|
 | `extract` | ffmpeg tách audio ra WAV mono 16 kHz |
-| `transcribe` | **ffmpeg** định khung từng lượt phát ngôn, **Gemini/Whisper** chép lời cho từng lượt |
-| `translate` | Gemini dịch sang tiếng Việt, giữ nguyên số dòng và thứ tự |
-| `synthesize` | VieNeu/edge-tts đọc từng lượt thoại bằng giọng đã chọn |
+| `transcribe` | **ffmpeg** khoanh vùng có tiếng, **Whisper** chép lời + mốc từng từ → tách thành **từng CÂU** đặt đúng thời điểm |
+| `translate` | Gemini dịch sang tiếng Việt (các lô chạy **song song**), giữ nguyên số dòng và thứ tự |
+| `synthesize` | VieNeu/edge-tts đọc **từng câu**, gộp lô trên GPU (câu độ dài gần nhau vào cùng lô cho khỏi phí) |
 | `subtitle` | Dựng `.srt`, cue bám theo thời lượng giọng đọc thật |
 | `assemble` | Đặt từng đoạn vào đúng mốc thời gian trên nền im lặng dài bằng video |
 | `mux` | ffmpeg ghép video gốc + track mới, **không** map audio gốc |
@@ -150,17 +158,40 @@ Gemini:  0.00–13.90   13.90–25.90   25.90–37.90   ... và một mốc kế
 
 Hai mốc đầu còn khớp, sau đó trôi dần, và cuối cùng nó trả về một segment kết thúc ở giây 200 của một đoạn audio chỉ dài 120 giây. Khoảng lặng luôn đúng bằng 0.00s — dấu hiệu rõ ràng là các mốc được suy ra chứ không được đo.
 
-Nên pipeline dùng `silencedetect` của ffmpeg để tìm các vùng có tiếng nói thật, rồi gửi **từng vùng** cho Gemini chép lời. Mốc thời gian là thật, và văn bản chắc chắn thuộc đúng vùng đó.
+Nên pipeline dùng `silencedetect` của ffmpeg để tìm các vùng có tiếng nói thật, rồi gửi **từng vùng** cho model chép lời. Mốc vùng là thật, và văn bản chắc chắn thuộc đúng vùng đó.
+
+### Đọc theo từng câu, đặt đúng thời điểm
+
+ffmpeg khoanh vùng có tiếng, nhưng một vùng thường chứa **nhiều câu** (trần 12 giây). Đọc
+cả khối rồi đặt tại một mốc khiến tiếng Việt lệch dần so với hình, và một câu tiếng Anh bị
+vùng chẻ đôi sẽ đọc thành "Hôm ...(nghỉ)... nay". Nên với Whisper, pipeline bật
+`word_timestamps` lấy mốc **từng từ**, rồi tách mỗi vùng thành **từng câu** theo dấu chấm
+câu (`pipeline/whisper_stt.py::sentences_from_words`). Mỗi câu:
+
+- là **một lượt đọc VieNeu riêng** — model giọng nói vốn ổn định ở mức câu; nhồi nhiều câu
+  làm một khối khiến nó thỉnh thoảng chèn khoảng lặng dài hoặc đọc bịa (đo thật: một khối
+  4 câu ra lỗ hổng im lặng 4,72s ở giữa);
+- được **đặt đúng thời điểm câu tiếng Anh** (mốc đầu câu) nên bám hình sát hơn hẳn;
+- câu bị vùng chẻ đôi được **ghép lại** (mảnh chưa kết bằng dấu câu nối với mảnh sau, không
+  vượt trần thời lượng).
+
+ffmpeg vẫn lo **thời gian thô** (ràng buộc Whisper chỉ chép chỗ có tiếng), Whisper tinh mốc
+câu bên trong — mốc căn chỉnh thật của nó, không phải bịa như Gemini. Bật/tắt qua
+`SENTENCE_LEVEL_TIMING` (mặc định bật; `STT_PROVIDER=gemini` tự tắt vì Gemini không có mốc).
+
+Đo trên cửa sổ 1:30–1:40 của một video thật, trước/sau khi đọc theo câu: lỗ hổng im lặng
+dài nhất **4,72s → 0,86s**, tiếng Việt bám hình **75% → 85%**, số lỗ hổng ≥1,5s cả video
+**39 → 11**.
 
 ### Vài điểm đáng biết
 
 - **Audio gốc bị xóa hoàn toàn.** Lệnh mux chỉ map `0:v:0` và `1:a:0`. Có hẳn một test (`tests/test_mux_args.py`) canh để không ai vô tình thêm `-map 0:a`.
 - **Video không bị encode lại** (`-c:v copy`) nên nhanh và không giảm chất lượng hình. Nếu container `.mp4` không chứa nổi codec gốc, hệ thống tự lùi về `.mkv`.
 - **Phụ đề dựng SAU giọng đọc.** Giọng Việt thường đọc xong sớm hơn khung thời gian gốc; nếu trải cue theo khung thì các cue cuối rơi vào chỗ im lặng. Đo thực tế: 17% cue lệch khỏi tiếng nói → 0% sau khi bám theo thời lượng đọc thật.
-- **Mỗi lượt phát ngôn là một mốc neo đồng bộ.** Trần một lượt là `MAX_UTTERANCE_SECONDS` (mặc định 12) — càng ngắn thì tiếng Việt càng bám sát mốc câu gốc, vì cả khối tiếng Việt của một lượt được đặt tại đúng một mốc.
-- **Tiếng Việt dài hơn khung gốc → ba nấc, không bao giờ cắt chữ.** (1) Tăng tốc *nhẹ* (≤1,15× — dưới ngưỡng tai người nhận ra) đưa câu về sát khung gốc; (2) phần còn dư tràn tự nhiên vào khoảng lặng phía sau, tới sát mốc câu kế tiếp; (3) hết cả chỗ mượn mới tăng tốc mạnh (tối đa `TTS_MAX_SPEEDUP`), và nếu vẫn dư thì câu sau **lùi lại chờ** thay vì hai giọng đè nhau — phần lệch tự tan ở khoảng lặng kế tiếp. Không bao giờ kéo chậm để lấp khoảng trống — giọng bị kéo lê nghe giả hơn im lặng. Phụ đề luôn bám mốc phát thật sau khi xếp chỗ. Nấc (1) đến từ đo đạc: không có nó, 132/156 lượt của một video thật bị dồn toa vì tiếng Việt thường dài hơn tiếng Anh một chút.
+- **Mỗi CÂU là một mốc neo đồng bộ.** Với Whisper, mỗi câu đặt đúng mốc câu tiếng Anh (mốc từng từ). Trần một vùng ffmpeg là `MAX_UTTERANCE_SECONDS` (mặc định 12) — nay chỉ dùng để chặn vùng quá dài *trước khi* tách câu, chứ không còn là hạt đồng bộ (xem "Đọc theo từng câu").
+- **Tiếng Việt dài hơn khung → tăng tốc theo nấc; NGẮN hơn khung → kéo giãn nhẹ.** Dài hơn: (1) tăng tốc *nhẹ* (≤1,15× — dưới ngưỡng tai) về sát khung; (2) phần dư tràn vào khoảng lặng phía sau tới sát mốc câu kế tiếp; (3) hết chỗ mượn mới tăng tốc mạnh (tối đa `TTS_MAX_SPEEDUP`, mặc định **1,3×**), vẫn dư thì câu sau **lùi lại chờ** thay vì hai giọng đè nhau. Ngắn hơn: VieNeu đọc nhanh hơn tiếng Anh (~1,6×) nên câu hay xong SỚM — khi đó **kéo giãn nhẹ** (tối đa tới sàn `TTS_FILL_SLOWDOWN=0.9`, dài thêm ~11%, tai không nhận ra) để bám hình thay vì để im lặng cụt. Không bao giờ **cắt chữ**. Phụ đề luôn bám mốc phát thật.
 - **Không đoạn nào bị bỏ rơi trong im lặng.** Đoạn nhận diện hỏng (dính 429 lúc 8 luồng dồn dập) được thử lại tuần tự sau khi cơn dồn request dịu; vẫn hỏng thì báo rõ trên màn kết quả kèm mốc thời gian, không lẳng lặng thiếu lời thoại.
-- **Chống TTS "chạy hoang".** Model giọng nói tự hồi quy thỉnh thoảng bịa thêm lời khi đầu vào quá ngắn — đo thật: chữ "Và" (2 ký tự) sinh ra 7,1 giây giọng nói, kéo 15 câu sau lệch 3–6 giây. Không văn bản nào được phép sinh nhiều audio hơn `số ký tự ÷ 8 + 1s` (đọc chậm nhất còn hợp lý; VieNeu thực tế đọc 14–17 ký tự/giây) — vượt trần là audio bịa, bị cắt kèm fade, từ thật luôn nằm ở phần đầu.
+- **Chống TTS "chạy hoang" + đọc lại lượt xấu.** Model tự hồi quy thỉnh thoảng bịa lời khi đầu vào quá ngắn (đo: "Và" 2 ký tự → 7,1s giọng, kéo 15 câu sau lệch 3–6s). Trần độ dài: `max(số ký tự ÷ 8 + 1s, 4s)` — vượt là audio bịa, cắt kèm fade; sàn 4s tha cho câu ngắn đọc bình thường (VieNeu tốn ~2–3,5s cố định mỗi lượt bất kể dài ngắn). Ngoài ra model còn **ngẫu nhiên** ~1–2% lượt rút phải mẫu xấu có **lỗ hổng im lặng dài ở giữa** câu (nghe "ngắt đột ngột") — lượt nào có khoảng lặng bất thường (>1,3s) thì **đọc lại**, giữ bản sạch nhất. Chỉ bật cho backend local (đọc lại không tốn gì); Gemini TTS tính tiền theo lượt nên để tắt.
 - **Lời thoại không được đưa trần vào TTS.** Gặp câu hỏi, model tưởng đó là câu lệnh và định trả lời (`"Model tried to generate text, but it should only be used for TTS"`). Pipeline bọc mỗi lượt trong một câu lệnh đọc nguyên văn — đã kiểm chứng là câu lệnh đó không bị đọc thành tiếng.
 - **Số dòng dịch phải khớp tuyệt đối.** Lệch một dòng là lệch giờ toàn bộ phần sau, nên hệ thống thử lại một lần rồi báo lỗi thay vì xuất ra video sai tiếng. Prompt dịch cũng cấm lược ý: khung thời gian chỉ quyết định *cách diễn đạt*, không quyết định *lượng thông tin* — câu dài ra đã có cơ chế mượn khoảng lặng ở trên lo.
 - **Nhiều video cùng lúc.** Trang chủ là form thêm video + danh sách job bên dưới; mỗi video một thẻ với tiến trình riêng. Tối đa `MAX_CONCURRENT_JOBS` (mặc định 2) video chạy đồng thời, video nộp thêm xếp hàng chờ. Trần đặt thấp có chủ ý: Whisper/VieNeu bị khóa suy luận toàn cục và edge-tts bị trần 2 request đồng thời, nên job thứ ba chủ yếu chen hàng chứ không nhanh thêm.
@@ -181,24 +212,58 @@ Nên pipeline dùng `silencedetect` của ffmpeg để tìm các vùng có tiế
 - Là endpoint đọc-thành-tiếng của trình duyệt Edge, dùng theo cách **không chính thức**. Microsoft không cam kết gì; nó có thể ngừng chạy bất cứ lúc nào. Khi đó đổi `TTS_PROVIDER=gemini` trong `.env` là quay lại được ngay.
 - **Nó bóp tần suất.** Đo thực tế: 6 luồng song song → 25/32 request thành công; 2 luồng kèm thử lại → 10/10. Vì vậy `TTS_WORKERS=2` và `EDGE_TTS_ATTEMPTS=5`.
 
-### Gemini hay Whisper ở bước nhận diện
+### Whisper hay Gemini ở bước nhận diện
 
-`STT_PROVIDER=gemini` (khuyến nghị khi chấp nhận trả phí): mỗi vùng tiếng nói gửi thẳng cho
-Gemini, 8 luồng song song, và **tắt thinking** — chép lời không cần suy luận, đo trên
-gemini-3.5-flash qua Vertex thấy 4,2–18,9 giây/request khi để mặc định giảm còn ~2,3 giây
-khi tắt (model nào không nhận `thinking_config` thì tự lùi về mặc định). Chuẩn hơn
-Whisper `small`, nhất là với thuật ngữ và tên riêng.
+`STT_PROVIDER=whisper` (**mặc định**): miễn phí, không hạn mức, chạy offline, và **cho mốc
+từng từ để cắt câu**. Trên GPU NVIDIA thì nhanh — gộp cả lô vùng trong một lượt gọi (cỡ lô
+tự suy từ VRAM trống):
 
-`STT_PROVIDER=whisper`: miễn phí, không hạn mức, chạy offline. Đo trên máy Apple Silicon
-(CPU, model `small`): **8,8 phút audio hết 78 giây**. Lần chạy đầu tải model về (~460 MB).
-Muốn chép chính xác hơn thì đổi `WHISPER_MODEL=medium`, chậm hơn.
+    từng vùng một   : 67 giây   (GPU 34%)
+    gộp lô (GPU)    :  7 giây               ← ~9× nhanh hơn
 
-Lưu ý: pipeline **không** dùng mốc thời gian của model nào cả — ffmpeg đã cho ranh giới
-chính xác tuyệt đối. Gemini/Whisper chỉ chép chữ.
+Video 19 phút chép lời xong ~13 giây khi model đã nạp; server nạp sẵn Whisper lúc boot để
+job đầu khỏi chờ ~11 giây tải model. Không có GPU thì tự lùi về CPU (chậm hơn nhiều). Lần
+chạy đầu tải model (~484 MB). Muốn chép chính xác hơn: `WHISPER_MODEL=medium` (chậm hơn).
+
+`STT_PROVIDER=gemini` (khi chấp nhận trả phí): mỗi vùng gửi thẳng cho Gemini, 8 luồng song
+song, tắt thinking (đo gemini-3.5-flash/Vertex: 4,2–18,9s/request → ~2,3s khi tắt). Chép
+chuẩn hơn với thuật ngữ và tên riêng, nhưng **không có mốc từng từ nên tắt việc cắt câu**.
+
+Lưu ý về thời gian: ffmpeg cho ranh giới **vùng** chính xác (khoanh chỗ có tiếng); Whisper
+tinh **mốc câu** bên trong bằng mốc từng từ. Gemini trên Developer API không đo được mốc,
+chỉ chép chữ.
 
 ### Nếu vẫn muốn dùng Gemini TTS
 
 Đặt `TTS_PROVIDER=gemini`. Khi chạm trần, app **không im lặng giả vờ thành công**: nó dừng thử lại ngay (Google bảo đợi hơn 4 tiếng), báo đỏ ở màn hoàn tất, cho biết bao nhiêu lượt bị bỏ trống, và vẫn cho tải video + phụ đề đầy đủ về. Muốn bỏ trần thì bật thanh toán trong Google Cloud — khi đó **giọng đọc là khoản tốn nhất**, tra giá tại <https://ai.google.dev/gemini-api/docs/pricing>.
+
+---
+
+## Hiệu năng (GPU)
+
+Video 19 phút xong **cả** pipeline trong ~2 phút trên GPU 12 GB (280 câu). Đo từng bước rồi
+tối ưu đúng chỗ nghẽn — mọi cỡ lô **tự suy từ VRAM trống** nên cùng một công thức ép tối đa
+mọi loại card, không ghim cứng:
+
+- **Nhận diện (Whisper):** gộp cả lô vùng trên GPU (~9× so với từng vùng một), nạp sẵn model
+  lúc boot. `word_timestamps` (để cắt câu) chỉ tốn thêm ~1,5s.
+- **Dịch (Gemini):** các lô chạy **song song** (`TRANSLATE_WORKERS`, mặc định 6); ngữ cảnh
+  lấy từ lời gốc nên lô nào cũng độc lập. Đo: 63,7s → 33,6s.
+- **Đọc (VieNeu):** đọc **từng câu**, gộp lô trên GPU. Vòng sinh token nghẽn ở *phóng kernel*
+  nên chi phí một lô ≈ câu **dài nhất** trong lô — xếp câu độ dài gần nhau vào cùng lô để lô
+  ngắn khỏi chờ câu dài (đo: generate 43,5s → 30s). Ép khung (ffmpeg atempo) chạy **song
+  song** vì ffmpeg thả GIL (12,5s → ~2s). Giải mã codec để **từng câu** — gộp lô phần này
+  đòi hàng chục GB, tràn VRAM.
+
+Cờ chỉnh trong `.env` (đều có mặc định an toàn):
+
+| Cờ | Mặc định | Việc |
+|---|---|---|
+| `SENTENCE_LEVEL_TIMING` | `true` | Đọc theo từng câu theo mốc từng từ (chỉ Whisper) |
+| `TTS_FILL_SLOWDOWN` | `0.9` | Sàn kéo giãn để câu ngắn bám hình; `1.0` = tắt |
+| `TTS_MAX_SPEEDUP` | `1.3` | Trần tăng tốc câu dài |
+| `TRANSLATE_WORKERS` | `6` | Số lô dịch song song (hạ nếu Gemini free tier bị 429) |
+| `VIENEU_BATCH_SIZE` | `0` (tự) | Ép cứng cỡ lô VieNeu nếu muốn |
 
 ---
 
