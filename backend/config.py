@@ -26,8 +26,16 @@ class Settings(BaseSettings):
 
     # Nhà cung cấp cho từng bước. Mặc định né hẳn trần 100 lượt/ngày của Gemini TTS.
     stt_provider: str = "whisper"   # whisper (miễn phí, chạy trên máy) | gemini
-    tts_provider: str = "edge"      # edge | vieneu (offline) | gemini
+    tts_provider: str = "edge"      # edge | vieneu (offline) | omnivoice (nhân bản, offline) | gemini
     # Bước dịch luôn dùng Gemini — chỉ tốn 1–4 lượt gọi cho cả video.
+
+    # Engine đọc giọng NHÂN BẢN, định tuyến RIÊNG khỏi giọng dựng sẵn (xem pipeline/voices.py
+    # ::route_provider). Chọn giọng nhân bản → dùng engine này; chọn giọng dựng sẵn → tts_provider.
+    #   omnivoice  nhân bản zero-shot chất lượng cao (CC-BY-NC, cần cài + tải model ~3,3 GB);
+    #              TỰ LÙI về vieneu nếu chưa cài OmniVoice.
+    #   vieneu     nhân bản bằng chính engine VieNeu (hành vi cũ).
+    #   none       tắt tính năng nhân bản.
+    clone_tts_provider: str = "omnivoice"
 
     # Model Gemini — đổi được khi Google cập nhật, không cần sửa code.
     gemini_stt_model: str = "gemini-3.5-flash"
@@ -43,6 +51,12 @@ class Settings(BaseSettings):
 
     # VieNeu mặc định nhúng dấu chìm vào audio; ta tắt, bật lại nếu bạn muốn.
     vieneu_watermark: bool = False
+
+    # OmniVoice (engine giọng nhân bản). num_step = số bước sinh: 32 mặc định (chất lượng),
+    # hạ 16–24 để nhanh hơn (đo: 16≈3,5s vs 32≈6,2s/câu). batch_size 0 = tự suy từ VRAM,
+    # cạp ở knee đo được (~8) — OmniVoice nghẽn sức tính, lô to hơn không nhanh thêm.
+    omnivoice_num_step: int = 32
+    omnivoice_batch_size: int = 0
 
     # Số lượt thoại VieNeu gộp vào MỘT lượt gọi GPU. 0 = tự chọn theo dung lượng card.
     # Đây là đòn bẩy hiệu năng lớn nhất của cả pipeline (từng câu một: 2,3 lần thời gian
@@ -91,11 +105,15 @@ class Settings(BaseSettings):
 
     @property
     def provider_config(self):
+        return self.provider_config_for(self.tts_provider)
+
+    def provider_config_for(self, tts_provider: str):
+        """ProviderConfig với engine giọng đọc CHỈ ĐỊNH — để định tuyến theo giọng mỗi job."""
         from pipeline.backends import ProviderConfig
 
         return ProviderConfig(
             stt_provider=self.stt_provider,
-            tts_provider=self.tts_provider,
+            tts_provider=tts_provider,
             gemini_api_key=self.gemini_api_key,
             gemini_backend=self.gemini_backend,
             gemini_stt_model=self.gemini_stt_model,
@@ -105,18 +123,39 @@ class Settings(BaseSettings):
             whisper_compute_type=self.whisper_compute_type,
             edge_tts_attempts=self.edge_tts_attempts,
             vieneu_watermark=self.vieneu_watermark,
+            omnivoice_num_step=self.omnivoice_num_step,
+            omnivoice_batch_size=self.omnivoice_batch_size,
         )
+
+    @property
+    def resolved_clone_provider(self) -> str | None:
+        """Engine nhân bản thực tế, đã tính việc OmniVoice có cài hay chưa.
+
+        '' / 'none' = tắt nhân bản (trả None). 'omnivoice' tự lùi về 'vieneu' nếu chưa cài
+        gói omnivoice — nhờ vậy đặt mặc định omnivoice mà máy chưa cài thì KHÔNG hỏng.
+        """
+        choice = (self.clone_tts_provider or "").strip().lower()
+        if choice in ("", "none"):
+            return None
+        if choice == "omnivoice":
+            import importlib.util
+
+            if importlib.util.find_spec("omnivoice") is None:
+                return "vieneu"
+        return choice
 
     @property
     def model_specs(self) -> list:
         """Các model cần tải về máy, theo nhà cung cấp đang cấu hình."""
-        from pipeline.model_store import vieneu_spec, whisper_spec
+        from pipeline.model_store import omnivoice_spec, vieneu_spec, whisper_spec
 
         specs = []
         if self.stt_provider == "whisper":
             specs.append(whisper_spec(self.whisper_model))
         if self.tts_provider == "vieneu":
             specs.append(vieneu_spec())
+        if self.resolved_clone_provider == "omnivoice":
+            specs.append(omnivoice_spec())
         return specs
 
     @property

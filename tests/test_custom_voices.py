@@ -150,9 +150,13 @@ def _upload(client, name="Giọng Test"):
                        files={"audio": ("mau.mp3", b"fake-mp3-bytes", "audio/mpeg")})
 
 
-def test_cloning_flag_follows_the_provider(client, monkeypatch):
+def test_cloning_enabled_whenever_a_clone_engine_exists(client, monkeypatch):
+    # Có engine clone (mặc định omnivoice, hoặc lùi về vieneu) → bật, KỂ CẢ khi preset là edge.
     assert client.get("/api/voices/cloning").json() == {"enabled": True}
     monkeypatch.setattr(settings, "tts_provider", "edge")
+    assert client.get("/api/voices/cloning").json() == {"enabled": True}
+    # Tắt hẳn nhân bản.
+    monkeypatch.setattr(settings, "clone_tts_provider", "none")
     assert client.get("/api/voices/cloning").json() == {"enabled": False}
 
 
@@ -166,8 +170,14 @@ def test_uploading_a_sample_creates_a_selectable_voice(client):
     assert mine["custom"] is True
 
 
-def test_cloning_is_refused_on_other_providers(client, monkeypatch):
+def test_cloning_works_on_any_preset_provider(client, monkeypatch):
+    # Định tuyến: preset=edge nhưng giọng nhân bản vẫn tạo được (sẽ đọc bằng engine clone).
     monkeypatch.setattr(settings, "tts_provider", "edge")
+    assert _upload(client).json()["custom"] is True
+
+
+def test_cloning_is_refused_only_when_disabled(client, monkeypatch):
+    monkeypatch.setattr(settings, "clone_tts_provider", "none")
     assert _upload(client).status_code == 400
 
 

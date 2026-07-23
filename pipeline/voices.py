@@ -83,26 +83,65 @@ VIENEU_VOICES: list[Voice] = [
     Voice("minh-triet", "Minh Triết — nam, giọng Nam, tin tức", "Minh Triết"),
 ]
 
-_BY_PROVIDER = {"edge": EDGE_VOICES, "gemini": GEMINI_VOICES, "vieneu": VIENEU_VOICES}
+# OmniVoice không có giọng dựng sẵn — nó là engine nhân bản thuần, nên danh sách gốc rỗng;
+# giọng của nó hoàn toàn là các giọng nhân bản người dùng đã lưu (ghép vào bên dưới).
+_BY_PROVIDER = {"edge": EDGE_VOICES, "gemini": GEMINI_VOICES, "vieneu": VIENEU_VOICES,
+                "omnivoice": []}
+
+# Nhà cung cấp dùng giọng nhân bản làm giọng đọc: VieNeu (kèm giọng dựng sẵn) và OmniVoice
+# (chỉ có giọng nhân bản).
+_CLONE_PROVIDERS = {"vieneu", "omnivoice"}
+
+
+def _clone_voices() -> list[Voice]:
+    """Giọng nhân bản người dùng đã lưu; id chính là tên mà engine offline nhận."""
+    from . import custom_voices
+
+    return [
+        Voice(c.id, f"{c.display_name} — giọng nhân bản", c.id)
+        for c in custom_voices.list_custom()
+    ]
 
 
 def voices_for(provider: str) -> list[Voice]:
     base = _BY_PROVIDER.get(provider, EDGE_VOICES)
-    if provider != "vieneu":
+    if provider not in _CLONE_PROVIDERS:
         return base
+    return base + _clone_voices()
 
-    # Giọng nhân bản chỉ tồn tại trên VieNeu; id của chúng chính là tên engine nhận.
+
+def available_voices(tts_provider: str, clone_provider: str | None) -> list[Voice]:
+    """Giọng cho giao diện/kiểm tra khi ĐỊNH TUYẾN theo loại giọng.
+
+    = giọng dựng sẵn của `tts_provider` + giọng nhân bản (nếu có engine clone). Nhờ vậy
+    dù đặt TTS_PROVIDER=edge, người dùng vẫn thấy và chọn được giọng nhân bản — chúng sẽ
+    được đọc bằng engine clone (OmniVoice) qua `route_provider`.
+    """
+    voices = list(_BY_PROVIDER.get(tts_provider, EDGE_VOICES))
+    if clone_provider in _CLONE_PROVIDERS:
+        voices += _clone_voices()
+    return voices
+
+
+def route_provider(voice_id: str, tts_provider: str, clone_provider: str | None) -> str:
+    """Engine đọc cho MỘT giọng: giọng nhân bản → engine clone; còn lại → tts_provider.
+
+    Mỗi job chỉ dùng một giọng, nên đây là một quyết định duy nhất cho cả job (không phải
+    mỗi câu). Không có engine clone thì đành trả tts_provider — không còn đường nào khác.
+    """
     from . import custom_voices
 
-    clones = [
-        Voice(c.id, f"{c.display_name} — giọng nhân bản", c.id)
-        for c in custom_voices.list_custom()
-    ]
-    return base + clones
+    if clone_provider and custom_voices.is_custom(voice_id):
+        return clone_provider
+    return tts_provider
 
 
 def is_valid(voice_id: str, provider: str) -> bool:
     return any(v.id == voice_id for v in voices_for(provider))
+
+
+def is_available(voice_id: str, tts_provider: str, clone_provider: str | None) -> bool:
+    return any(v.id == voice_id for v in available_voices(tts_provider, clone_provider))
 
 
 def default_voice(provider: str) -> str:

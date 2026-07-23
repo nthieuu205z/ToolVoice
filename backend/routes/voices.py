@@ -13,10 +13,22 @@ from pipeline import custom_voices
 from pipeline.audio import decode_to_pcm, write_wav
 from pipeline.errors import FFmpegError
 from pipeline.models import TTS_SAMPLE_RATE
-from pipeline.voices import voices_for
+from pipeline.voices import available_voices
 
 log = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _clone_synthesizer():
+    """Engine đọc giọng nhân bản đang cấu hình (OmniVoice hoặc VieNeu)."""
+    if settings.resolved_clone_provider == "omnivoice":
+        from pipeline.omnivoice_speech import OmniVoiceSynthesizer
+
+        return OmniVoiceSynthesizer(whisper_model=settings.whisper_model,
+                                    whisper_compute_type=settings.whisper_compute_type)
+    from pipeline.vieneu_speech import VieNeuSynthesizer
+
+    return VieNeuSynthesizer(watermark=settings.vieneu_watermark)
 
 # Audio mẫu: VieNeu tự cắt về ≤8 giây, nhưng nhận vào 12 giây cho thoải mái.
 _SAMPLE_MAX_SECONDS = 12.0
@@ -31,7 +43,7 @@ _PREVIEW_TEXT = "Xin chào, đây là giọng đọc tiếng Việt dùng để 
 def list_voices() -> list[dict]:
     """Kèm `preview_url` khi đã có file nghe thử; chưa có thì để rỗng, giao diện tự ẩn nút."""
     result = []
-    for voice in voices_for(settings.tts_provider):
+    for voice in available_voices(settings.tts_provider, settings.resolved_clone_provider):
         preview = settings.previews_dir / f"{voice.id}.wav"
         result.append({
             "id": voice.id,
@@ -44,14 +56,14 @@ def list_voices() -> list[dict]:
 
 @router.get("/api/voices/cloning")
 def cloning_status() -> dict:
-    """Nhân bản giọng cần engine VieNeu — các provider khác không học được giọng mới."""
-    return {"enabled": settings.tts_provider == "vieneu"}
+    """Nhân bản bật khi có engine clone (OmniVoice hoặc VieNeu) — không phụ thuộc giọng dựng sẵn."""
+    return {"enabled": settings.resolved_clone_provider is not None}
 
 
 @router.post("/api/voices/custom")
 async def create_custom_voice(name: str = Form(...), audio: UploadFile = File(...)) -> dict:
-    if settings.tts_provider != "vieneu":
-        raise HTTPException(400, "Nhân bản giọng chỉ hoạt động khi TTS_PROVIDER=vieneu trong .env.")
+    if settings.resolved_clone_provider is None:
+        raise HTTPException(400, "Nhân bản giọng đang tắt (CLONE_TTS_PROVIDER=none trong .env).")
 
     name = name.strip()
     if not 1 <= len(name) <= 40:
@@ -93,10 +105,9 @@ def _normalize_sample(raw: bytes, voice_id: str) -> None:
 
 def _generate_preview(voice_id: str) -> None:
     from pipeline.audio import pcm_to_array
-    from pipeline.vieneu_speech import VieNeuSynthesizer
 
     try:
-        pcm = VieNeuSynthesizer(watermark=settings.vieneu_watermark).synthesize(_PREVIEW_TEXT, voice_id)
+        pcm = _clone_synthesizer().synthesize(_PREVIEW_TEXT, voice_id)
         write_wav(settings.previews_dir / f"{voice_id}.wav", pcm_to_array(pcm))
         log.info("Đã tạo file nghe thử cho giọng nhân bản %s", voice_id)
     except Exception as exc:  # thiếu nghe thử không phải lỗi chết người
@@ -111,8 +122,11 @@ def delete_custom_voice(voice_id: str) -> dict:
     custom_voices.remove(voice_id)
     (settings.previews_dir / f"{voice_id}.wav").unlink(missing_ok=True)
 
-    # Engine có thể còn giữ embedding trong RAM — bảo nó quên đi.
-    from pipeline.vieneu_speech import forget_clone
+    # Bảo mọi engine clone quên giọng: VieNeu giữ embedding trong RAM, OmniVoice giữ ref_text
+    # trong file sidecar. Gọi cả hai để id không trỏ vào dữ liệu cũ dù đang cấu hình engine nào.
+    from pipeline.omnivoice_speech import forget_clone as omnivoice_forget
+    from pipeline.vieneu_speech import forget_clone as vieneu_forget
 
-    forget_clone(voice_id)
+    vieneu_forget(voice_id)
+    omnivoice_forget(voice_id)
     return {"deleted": voice_id}

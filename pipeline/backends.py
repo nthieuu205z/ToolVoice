@@ -26,6 +26,8 @@ class ProviderConfig:
     whisper_compute_type: str = "int8"
     edge_tts_attempts: int = 5
     vieneu_watermark: bool = False
+    omnivoice_num_step: int = 32
+    omnivoice_batch_size: int = 0
 
 
 class LazyGemini:
@@ -128,6 +130,16 @@ def build_backend(config: ProviderConfig) -> CompositeBackend:
         from .vieneu_speech import VieNeuSynthesizer
 
         synthesizer = VieNeuSynthesizer(watermark=config.vieneu_watermark)
+    elif config.tts_provider == "omnivoice":
+        from .omnivoice_speech import OmniVoiceSynthesizer
+
+        # Cần model Whisper để chép ref_text của clip mẫu (một lần mỗi giọng).
+        synthesizer = OmniVoiceSynthesizer(
+            whisper_model=config.whisper_model,
+            whisper_compute_type=config.whisper_compute_type,
+            num_step=config.omnivoice_num_step,
+            batch_size=config.omnivoice_batch_size,
+        )
     else:
         synthesizer = gemini
 

@@ -78,6 +78,28 @@ Kiểm tra — dòng dưới phải in `True` kèm tên card:
 python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
 
+## 4b. (Tùy chọn) OmniVoice — giọng nhân bản chất lượng cao
+
+Mặc định `CLONE_TTS_PROVIDER=omnivoice`: khi bạn chọn một **giọng nhân bản**, tool đọc bằng
+OmniVoice (nhân bản zero-shot, nghe tự nhiên hơn hẳn VieNeu); giọng **dựng sẵn** vẫn dùng
+`TTS_PROVIDER`. Nếu chưa cài OmniVoice, tool **tự lùi về VieNeu** — không hỏng gì.
+
+Cài (chỉ phần *inference*, né xung đột `numpy 2.x` ↔ `librosa/numba` mà ta không cần):
+
+```powershell
+pip install omnivoice --no-deps
+pip install accelerate
+```
+
+Model **~3,3 GB** tự tải lần đầu, hoặc bấm nút tải trong mục **"Model trên máy"** (có thanh %).
+Lời của clip mẫu (`ref_text`) do Whisper chép một lần rồi nhớ cạnh clip — bạn không phải nhập.
+
+> **License:** trọng số OmniVoice là **CC-BY-NC (phi thương mại)** — dùng cá nhân thoải mái,
+> nhưng nếu thương mại hoá thì đây là ràng buộc (VieNeu là Apache-2.0, không vướng).
+
+Không muốn dùng OmniVoice? Đặt `CLONE_TTS_PROVIDER=vieneu` (nhân bản bằng VieNeu như cũ) hoặc
+`none` (tắt nhân bản) trong `.env`.
+
 ## 5. Kiểm tra `.env`
 
 Nếu đã chép `.env` từ máy cũ thì giữ nguyên. Nếu làm mới: `copy .env.example .env`

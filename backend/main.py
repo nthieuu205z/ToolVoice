@@ -32,6 +32,11 @@ async def _lifespan(app: FastAPI):
 
         # Whisper nạp mất ~11s lần lạnh — nạp nền song song để bước "quét" job đầu khỏi chờ.
         whisper_stt.prewarm(settings.whisper_model, settings.whisper_compute_type)
+    if settings.resolved_clone_provider == "omnivoice":
+        from pipeline import omnivoice_speech
+
+        # OmniVoice nạp mất ~30s lần lạnh — nạp nền để job giọng nhân bản đầu khỏi chờ.
+        omnivoice_speech.prewarm()
     yield
 
 

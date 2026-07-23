@@ -17,7 +17,7 @@ from pipeline.backends import CompositeBackend, build_backend
 from pipeline.errors import UnsupportedMediaError
 from pipeline.probe import probe_video
 from pipeline.runner import PipelineOptions
-from pipeline.voices import is_valid
+from pipeline.voices import is_available, route_provider
 
 router = APIRouter()
 
@@ -28,8 +28,9 @@ _SSE_HEARTBEAT_SECONDS = 15.0
 _KEEP_JOB_DIRS = 10
 
 
-def _make_backend() -> CompositeBackend:
-    return build_backend(settings.provider_config)
+def _make_backend(tts_provider: str) -> CompositeBackend:
+    """Engine giọng đọc CHỈ ĐỊNH cho job — provider đã được định tuyến theo giọng đã chọn."""
+    return build_backend(settings.provider_config_for(tts_provider))
 
 
 @router.post("/api/jobs")
@@ -37,8 +38,12 @@ async def create_job(video: UploadFile = File(...), voice_id: str = Form(...)) -
     # Bước dịch luôn cần Gemini, kể cả khi nhận diện và giọng đọc đã chạy miễn phí.
     if not settings.gemini_api_key:
         raise HTTPException(500, "Chưa có GEMINI_API_KEY. Tạo file .env từ .env.example rồi điền khóa.")
-    if not is_valid(voice_id, settings.tts_provider):
+    clone_provider = settings.resolved_clone_provider
+    if not is_available(voice_id, settings.tts_provider, clone_provider):
         raise HTTPException(400, f"Giọng đọc không hợp lệ: {voice_id}")
+
+    # Định tuyến một lần theo giọng: giọng nhân bản → engine clone; còn lại → tts_provider.
+    effective_tts = route_provider(voice_id, settings.tts_provider, clone_provider)
 
     manager.prune(settings.jobs_dir, keep=_KEEP_JOB_DIRS)
     workdir = settings.jobs_dir / uuid.uuid4().hex[:12]
@@ -65,7 +70,7 @@ async def create_job(video: UploadFile = File(...), voice_id: str = Form(...)) -
         tts_max_speedup=settings.tts_max_speedup,
         tts_fill_slowdown=settings.tts_fill_slowdown,
         tts_daily_budget=settings.tts_daily_budget,
-        tts_is_metered=settings.tts_provider == "gemini",
+        tts_is_metered=effective_tts == "gemini",
     )
     job = manager.start(
         filename=video.filename or video_path.name,
@@ -73,7 +78,7 @@ async def create_job(video: UploadFile = File(...), voice_id: str = Form(...)) -
         voice_id=voice_id,
         video_path=video_path,
         media=media,
-        backend_factory=_make_backend,
+        backend_factory=lambda: _make_backend(effective_tts),
         options=options,
     )
     return {"job_id": job.id}

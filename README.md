@@ -42,14 +42,31 @@ Mười hai giọng "Multilingual" của edge-tts mang nhãn `en-US`, `fr-FR`, `
 
 Dùng VieNeu (`uv pip install -e '.[vieneu]'`) khi bạn cần **giọng miền Trung / miền Nam**, hoặc muốn chạy hoàn toàn offline không phụ thuộc Microsoft. Model tải ngay trên giao diện, có thanh tiến trình.
 
-### Nhân bản giọng (chỉ VieNeu)
+### Nhân bản giọng (OmniVoice / VieNeu)
 
-Bấm **＋ Nhân bản giọng** cạnh tiêu đề "Chọn giọng đọc", đặt tên và tải một đoạn audio **3–8 giây** (một người nói, ít tạp âm). Giọng mới xuất hiện ngay trong danh sách; file nghe thử được tạo ở nền (lần đầu chờ nạp engine ~90 giây). Chỉ dùng giọng bạn có quyền sử dụng.
+Bấm **＋ Nhân bản giọng** cạnh tiêu đề "Chọn giọng đọc", đặt tên và tải một đoạn audio **3–8 giây** (một người nói, ít tạp âm). Giọng mới xuất hiện ngay trong danh sách; file nghe thử được tạo ở nền. Chỉ dùng giọng bạn có quyền sử dụng.
+
+Giọng nhân bản được **định tuyến riêng** khỏi giọng dựng sẵn qua `CLONE_TTS_PROVIDER` (mặc định `omnivoice`): chọn một giọng nhân bản → đọc bằng engine này; chọn giọng dựng sẵn → vẫn dùng `TTS_PROVIDER`. Nhờ vậy có thể ghép **edge cho giọng dựng sẵn + OmniVoice cho giọng nhân bản**. Mỗi job dùng một giọng nên đây là một quyết định duy nhất cho cả job.
+
+| `CLONE_TTS_PROVIDER` | Cách clone | Ghi chú |
+|---|---|---|
+| **`omnivoice`** (mặc định) | zero-shot đa ngôn ngữ | Chất lượng cao hơn hẳn; model ~3,3 GB tải trên giao diện; **CC-BY-NC (phi thương mại)**. Tự lùi về `vieneu` nếu chưa cài. |
+| `vieneu` | zero-shot từ speaker encoder | Dùng chính engine VieNeu (hành vi cũ), Apache-2.0 |
+| `none` | — | Tắt tính năng nhân bản |
+
+**Cài OmniVoice** — numpy 2.x xung đột với `librosa/numba` mà bản *inference* không cần (librosa chỉ là đường lùi đọc MP3; clip mẫu của ta là WAV nên soundfile lo hết), nên cài không kèm phụ thuộc:
+
+```
+pip install omnivoice --no-deps
+pip install accelerate
+```
+
+Model tự tải lần đầu, hoặc bấm nút tải trong mục "Model trên máy". `ref_text` (lời của clip mẫu) do Whisper chép **một lần** rồi nhớ trong file cạnh clip.
 
 Vài điều đáng biết:
-- Không có gì phải huấn luyện — engine trích embedding từ mẫu ngay lúc dùng (vài giây, một lần mỗi phiên). Xóa giọng là sạch.
-- Giọng dựng sẵn chạy **không cần torch**, nhưng nhân bản cần `torch/torchaudio` (~490 MB, đã nằm trong extra `[vieneu]`) — bước trích đặc trưng của speaker encoder dùng torchaudio, đây là hạn chế của thư viện.
-- Id giọng đã xóa **không bao giờ được cấp lại** (file `.tombstone` giữ chỗ): engine giữ embedding theo id trong RAM, tái dùng id với mẫu khác sẽ đọc bằng giọng cũ tới khi restart.
+- OmniVoice không giữ giọng trong RAM; VieNeu thì trích embedding mỗi phiên. Xóa giọng là sạch ở cả hai engine.
+- Id giọng đã xóa **không bao giờ được cấp lại** (file `.tombstone` giữ chỗ): VieNeu giữ embedding theo id trong RAM, tái dùng id với mẫu khác sẽ đọc bằng giọng cũ tới khi restart.
+- **License OmniVoice là CC-BY-NC** (phi thương mại) — dùng cá nhân thoải mái; nếu thương mại hoá thì đây là ràng buộc, khác VieNeu (Apache-2.0).
 
 ---
 
@@ -254,6 +271,10 @@ mọi loại card, không ghim cứng:
   ngắn khỏi chờ câu dài (đo: generate 43,5s → 30s). Ép khung (ffmpeg atempo) chạy **song
   song** vì ffmpeg thả GIL (12,5s → ~2s). Giải mã codec để **từng câu** — gộp lô phần này
   đòi hàng chục GB, tràn VRAM.
+- **Đọc giọng nhân bản (OmniVoice):** cũng gộp lô GPU, nhưng OmniVoice nghẽn *sức tính* chứ
+  không phải phóng kernel — per-item chạm đáy ở lô **~4–8** rồi thôi (đo 12 GB, num_step=32:
+  5,8s → **1,6s/câu**), nên cỡ lô cạp ở "knee" 8 thay vì ép to; VRAM rất rẻ (~4,8 GB ở lô 16).
+  `OMNIVOICE_NUM_STEP` đổi tốc độ⇄chất lượng (16≈3,5s vs 32≈6,2s mỗi câu).
 
 Cờ chỉnh trong `.env` (đều có mặc định an toàn):
 
@@ -264,6 +285,9 @@ Cờ chỉnh trong `.env` (đều có mặc định an toàn):
 | `TTS_MAX_SPEEDUP` | `1.3` | Trần tăng tốc câu dài |
 | `TRANSLATE_WORKERS` | `6` | Số lô dịch song song (hạ nếu Gemini free tier bị 429) |
 | `VIENEU_BATCH_SIZE` | `0` (tự) | Ép cứng cỡ lô VieNeu nếu muốn |
+| `CLONE_TTS_PROVIDER` | `omnivoice` | Engine đọc giọng nhân bản: `omnivoice` / `vieneu` / `none` |
+| `OMNIVOICE_NUM_STEP` | `32` | Số bước sinh OmniVoice; hạ 16–24 để nhanh hơn |
+| `OMNIVOICE_BATCH_SIZE` | `0` (tự) | Ép cứng cỡ lô OmniVoice nếu muốn |
 
 ---
 

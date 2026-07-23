@@ -17,5 +17,14 @@ custom_voices/
 # Thư mục skills của agent, không thuộc ứng dụng.
 .Agent/
 
+# Cấu hình Claude Code cá nhân (marketplace/MCP đã duyệt riêng máy này).
+.claude/settings.local.json
+
+# Kết quả tool phân tích code (không thuộc ứng dụng).
+graphify-out/
+
+# File audio đo/smoke ở gốc repo (sản phẩm của spike, không phải nguồn).
+/*.wav
+
 # Build artifact của Python.
 *.egg-info/

@@ -119,6 +119,20 @@ def test_no_local_models_when_everything_runs_in_the_cloud(client, monkeypatch):
     assert body == {"required": False, "ready": True, "models": []}
 
 
+def test_omnivoice_model_listed_when_clone_provider_is_omnivoice(monkeypatch):
+    monkeypatch.setattr(settings, "stt_provider", "gemini")   # bỏ spec whisper
+    monkeypatch.setattr(settings, "tts_provider", "edge")     # bỏ spec vieneu
+    monkeypatch.setattr(settings, "clone_tts_provider", "omnivoice")
+    assert [s.key for s in settings.model_specs] == ["omnivoice"]
+
+
+def test_omnivoice_model_absent_when_cloning_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "stt_provider", "gemini")
+    monkeypatch.setattr(settings, "tts_provider", "edge")
+    monkeypatch.setattr(settings, "clone_tts_provider", "none")
+    assert settings.model_specs == []
+
+
 # ─── bắt đầu tải ───
 
 def test_download_starts_the_requested_model(client, both_models, monkeypatch):

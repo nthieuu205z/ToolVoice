@@ -139,6 +139,15 @@ def vieneu_spec() -> ModelSpec:
     )
 
 
+def omnivoice_spec() -> ModelSpec:
+    """OmniVoice tự chứa trong một repo (~3,3 GB). Chỉ chạy trên GPU thực tế."""
+    return ModelSpec(
+        key="omnivoice",
+        label="Giọng nhân bản — OmniVoice (GPU)",
+        repos=[RepoSpec("k2-fsa/OmniVoice", None)],
+    )
+
+
 # ─── đo và tải ──────────────────────────────────────────────────────
 
 def _cache_dir(repo_id: str) -> Path:
