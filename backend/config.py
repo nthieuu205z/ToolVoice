@@ -152,9 +152,13 @@ class Settings(BaseSettings):
         specs = []
         if self.stt_provider == "whisper":
             specs.append(whisper_spec(self.whisper_model))
-        if self.tts_provider == "vieneu":
+        clone = self.resolved_clone_provider
+        # VieNeu cần tải khi là giọng đọc DỰNG SẴN hoặc là engine NHÂN BẢN — kể cả khi
+        # CLONE_TTS_PROVIDER=omnivoice tự lùi về vieneu vì chưa cài gói omnivoice. Nếu không
+        # liệt kê, job nhân bản đầu tải ngầm ~610 MB giữa chừng, không có thanh tiến trình.
+        if self.tts_provider == "vieneu" or clone == "vieneu":
             specs.append(vieneu_spec())
-        if self.resolved_clone_provider == "omnivoice":
+        if clone == "omnivoice":
             specs.append(omnivoice_spec())
         return specs
 

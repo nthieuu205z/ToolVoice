@@ -119,11 +119,26 @@ def test_no_local_models_when_everything_runs_in_the_cloud(client, monkeypatch):
     assert body == {"required": False, "ready": True, "models": []}
 
 
+def _clone_resolves_to(monkeypatch, value):
+    """Ép engine nhân bản đã-tính, để test khỏi phụ thuộc gói omnivoice có cài trên máy hay không."""
+    monkeypatch.setattr(type(settings), "resolved_clone_provider", property(lambda self: value))
+
+
 def test_omnivoice_model_listed_when_clone_provider_is_omnivoice(monkeypatch):
     monkeypatch.setattr(settings, "stt_provider", "gemini")   # bỏ spec whisper
     monkeypatch.setattr(settings, "tts_provider", "edge")     # bỏ spec vieneu
-    monkeypatch.setattr(settings, "clone_tts_provider", "omnivoice")
+    _clone_resolves_to(monkeypatch, "omnivoice")              # coi như omnivoice đã cài
     assert [s.key for s in settings.model_specs] == ["omnivoice"]
+
+
+def test_vieneu_model_listed_when_clone_falls_back_to_vieneu(monkeypatch):
+    """CLONE_TTS_PROVIDER=omnivoice nhưng CHƯA cài gói → lùi về vieneu (cấu hình MẶC ĐỊNH khi
+    người dùng chưa cài omnivoice). VieNeu vẫn phải được liệt kê để tải trước, nếu không job
+    nhân bản đầu tải ngầm ~610 MB giữa chừng, không có thanh tiến trình."""
+    monkeypatch.setattr(settings, "stt_provider", "gemini")   # bỏ spec whisper
+    monkeypatch.setattr(settings, "tts_provider", "edge")     # preset KHÔNG phải vieneu
+    _clone_resolves_to(monkeypatch, "vieneu")
+    assert [s.key for s in settings.model_specs] == ["vieneu"]
 
 
 def test_omnivoice_model_absent_when_cloning_disabled(monkeypatch):

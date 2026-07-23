@@ -21,7 +21,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 async def _lifespan(app: FastAPI):
     # Nằm trong lifespan chứ KHÔNG ở cấp import: test import app hàng chục lần,
     # không được phép mỗi lần lại nạp thật 609 MB engine vào RAM.
-    if settings.tts_provider == "vieneu":
+    clone = settings.resolved_clone_provider
+    # VieNeu nạp sẵn khi là giọng đọc DỰNG SẴN hoặc là engine NHÂN BẢN — kể cả khi
+    # CLONE_TTS_PROVIDER=omnivoice tự lùi về vieneu vì chưa cài omnivoice. Không thì job
+    # nhân bản đầu phải chờ nạp lạnh ~15–90s.
+    if settings.tts_provider == "vieneu" or clone == "vieneu":
         from pipeline import vieneu_speech
 
         vieneu_speech.configure(batch_size=settings.vieneu_batch_size)
@@ -32,7 +36,7 @@ async def _lifespan(app: FastAPI):
 
         # Whisper nạp mất ~11s lần lạnh — nạp nền song song để bước "quét" job đầu khỏi chờ.
         whisper_stt.prewarm(settings.whisper_model, settings.whisper_compute_type)
-    if settings.resolved_clone_provider == "omnivoice":
+    if clone == "omnivoice":
         from pipeline import omnivoice_speech
 
         # OmniVoice nạp mất ~30s lần lạnh — nạp nền để job giọng nhân bản đầu khỏi chờ.

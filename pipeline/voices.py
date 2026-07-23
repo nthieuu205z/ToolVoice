@@ -145,7 +145,16 @@ def is_available(voice_id: str, tts_provider: str, clone_provider: str | None) -
 
 
 def default_voice(provider: str) -> str:
-    return voices_for(provider)[0].id
+    """Giọng mặc định của provider. OmniVoice không có giọng dựng sẵn nên khi CHƯA có giọng
+    nhân bản nào, danh sách rỗng — báo lỗi rõ ràng thay vì IndexError khó hiểu."""
+    voices = voices_for(provider)
+    if not voices:
+        raise ValueError(
+            f"Nhà cung cấp '{provider}' chưa có giọng nào để chọn mặc định. OmniVoice chỉ đọc "
+            f"bằng giọng nhân bản — hãy tạo/chỉ định một giọng nhân bản (id 'clone-…'), hoặc "
+            f"đổi TTS_PROVIDER sang edge/vieneu."
+        )
+    return voices[0].id
 
 
 def native_id(voice_id: str, provider: str) -> str:

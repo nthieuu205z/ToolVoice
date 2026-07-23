@@ -11,7 +11,7 @@ import pytest
 from pipeline import custom_voices
 from pipeline.audio import write_wav
 from pipeline.models import TTS_SAMPLE_RATE
-from pipeline.voices import available_voices, is_available, route_provider
+from pipeline.voices import available_voices, default_voice, is_available, route_provider
 
 
 def _make_clone(voice_id: str = "clone-x", display: str = "X") -> str:
@@ -61,3 +61,20 @@ def test_is_available_accepts_clone_when_engine_present():
     assert not is_available("clone-x", tts_provider="edge", clone_provider=None)
     assert is_available("vi-VN-HoaiMyNeural", tts_provider="edge", clone_provider=None)
     assert not is_available("khong-ton-tai", tts_provider="edge", clone_provider="omnivoice")
+
+
+# ── default_voice ────────────────────────────────────────────────────────────
+def test_default_voice_returns_a_preset_for_normal_providers():
+    assert default_voice("edge").startswith("vi-VN")   # có giọng dựng sẵn
+
+
+def test_default_voice_on_omnivoice_without_clones_raises_clear_error():
+    # OmniVoice không có giọng dựng sẵn; chưa có giọng nhân bản → không có mặc định.
+    # Trước đây nổ IndexError khó hiểu; nay phải là lỗi rõ ràng, hành động được.
+    with pytest.raises(ValueError):
+        default_voice("omnivoice")
+
+
+def test_default_voice_on_omnivoice_returns_a_clone_when_present():
+    _make_clone("clone-d", "D")
+    assert default_voice("omnivoice") == "clone-d"
