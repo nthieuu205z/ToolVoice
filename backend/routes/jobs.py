@@ -71,6 +71,9 @@ async def create_job(video: UploadFile = File(...), voice_id: str = Form(...)) -
         tts_fill_slowdown=settings.tts_fill_slowdown,
         tts_daily_budget=settings.tts_daily_budget,
         tts_is_metered=effective_tts == "gemini",
+        # OmniVoice tự vá lỗ hổng im lặng (postprocess) nên KHÔNG chạy bước đọc-lại tốn kém
+        # (mỗi lần là một single-synth ~5,8s, không gộp lô). VieNeu/edge vẫn cần.
+        resynthesize_holes=effective_tts != "omnivoice",
     )
     job = manager.start(
         filename=video.filename or video_path.name,

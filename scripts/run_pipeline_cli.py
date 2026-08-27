@@ -56,6 +56,8 @@ def main() -> int:
         tts_max_speedup=settings.tts_max_speedup,
         tts_daily_budget=settings.tts_daily_budget,
         tts_is_metered=settings.tts_provider == "gemini",
+        # OmniVoice tự vá lỗ hổng (postprocess) → bỏ bước đọc-lại tốn kém; VieNeu/edge vẫn cần.
+        resynthesize_holes=settings.tts_provider != "omnivoice",
     )
 
     try:

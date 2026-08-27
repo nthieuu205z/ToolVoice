@@ -56,3 +56,48 @@ def test_local_tts_never_warns_about_gemini_quota(stub_stages):
 def test_metering_is_off_by_default():
     """CLI/route nào quên truyền cờ thì thà im lặng còn hơn dọa nhầm."""
     assert PipelineOptions(voice_id="v").tts_is_metered is False
+
+
+# ─── đọc lại lượt xấu: chỉ engine CÓ khuyết tật lỗ hổng im lặng mới cần ───
+
+def _capture_resynthesize(monkeypatch) -> dict:
+    """Bắt cờ resynthesize_bad mà runner thật sự truyền xuống bước đọc giọng."""
+    seen: dict = {}
+
+    def fake_synth(*a, **k):
+        seen["flag"] = k.get("resynthesize_bad")
+        return [], []
+
+    monkeypatch.setattr(runner, "synthesize_segments", fake_synth)
+    return seen
+
+
+def _run(stub_stages, options) -> None:
+    run_pipeline(None, stub_stages / "in.mp4", stub_stages, options, media=MEDIA)
+
+
+def test_omnivoice_skips_the_costly_resynthesis(stub_stages, monkeypatch):
+    """OmniVoice tự vá lỗ hổng bằng postprocess; đọc lại là một single-synth ~5,8s KHÔNG gộp
+    lô — ở video dài đó là khoản phí thuần túy vô ích."""
+    seen = _capture_resynthesize(monkeypatch)
+    _run(stub_stages, PipelineOptions(voice_id="v", resynthesize_holes=False))
+    assert seen["flag"] is False
+
+
+def test_vieneu_and_edge_still_resynthesize(stub_stages, monkeypatch):
+    """Khuyết tật lỗ hổng im lặng là có thật ở VieNeu — không được tắt nhầm của chúng."""
+    seen = _capture_resynthesize(monkeypatch)
+    _run(stub_stages, PipelineOptions(voice_id="v"))
+    assert seen["flag"] is True
+
+
+def test_metered_backend_never_resynthesizes(stub_stages, monkeypatch):
+    """Gemini tính tiền theo lượt: đọc lại vì CHẤT LƯỢNG là tiêu tiền, dù engine có khuyết tật."""
+    seen = _capture_resynthesize(monkeypatch)
+    _run(stub_stages, PipelineOptions(voice_id="v", tts_is_metered=True))
+    assert seen["flag"] is False
+
+
+def test_resynthesis_is_on_by_default():
+    """Route/CLI quên truyền cờ thì giữ hành vi cũ (đọc lại), không im lặng đổi chất lượng."""
+    assert PipelineOptions(voice_id="v").resynthesize_holes is True
