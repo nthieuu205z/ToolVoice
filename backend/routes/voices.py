@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import logging
 import threading
+import wave
 from pathlib import Path
 
 import numpy as np
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from backend.config import settings
-from backend.secure_files import HeldFileResponse, owned_file_response
+from backend.secure_files import HeldFileResponse, atomic_owned_file, owned_file_response
 from pipeline import custom_voices
 from pipeline.audio import decode_to_pcm, write_wav
 from pipeline.errors import FFmpegError
@@ -146,7 +147,13 @@ def _generate_preview(voice_id: str) -> None:
     try:
         pcm = _clone_synthesizer().synthesize(_PREVIEW_TEXT, voice_id)
         preview = _preview_path(voice_id)
-        write_wav(preview, pcm_to_array(pcm))
+        samples = pcm_to_array(pcm)
+        with atomic_owned_file(settings.previews_dir, preview) as file:
+            with wave.open(file, "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(TTS_SAMPLE_RATE)
+                wav.writeframes(samples.astype("<i2").tobytes())
         log.info("Đã tạo file nghe thử cho giọng nhân bản %s", voice_id)
     except Exception as exc:  # thiếu nghe thử không phải lỗi chết người
         log.warning("Không tạo được nghe thử cho %s: %s", voice_id, exc)

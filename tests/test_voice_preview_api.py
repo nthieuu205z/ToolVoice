@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 
 import numpy as np
@@ -56,6 +57,32 @@ def test_voice_preview_endpoint_serves_a_known_preview(client, tmp_path, monkeyp
     assert response.status_code == 200
     assert response.content == b"RIFFfake"
     assert response.headers["content-type"] == "audio/wav"
+    assert response.headers["accept-ranges"] == "bytes"
+    assert response.headers["content-length"] == "8"
+    assert response.headers["last-modified"]
+    assert response.headers["etag"]
+    assert response.headers["content-disposition"] == (
+        'attachment; filename="vi-VN-HoaiMyNeural.wav"'
+    )
+
+
+def test_voice_preview_endpoint_serves_a_byte_range(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "tts_provider", "edge")
+    monkeypatch.setattr(type(settings), "previews_dir", property(lambda self: tmp_path))
+    preview = tmp_path / "vi-VN-HoaiMyNeural.wav"
+    preview.write_bytes(b"RIFF0123456789")
+
+    response = client.get(
+        "/api/voices/vi-VN-HoaiMyNeural/preview",
+        headers={"Range": "bytes=4-7"},
+    )
+
+    assert response.status_code == 206
+    assert response.content == b"0123"
+    assert response.headers["accept-ranges"] == "bytes"
+    assert response.headers["content-range"] == "bytes 4-7/14"
+    assert response.headers["content-length"] == "4"
+    assert response.headers["content-type"] == "audio/wav"
     assert response.headers["content-disposition"] == (
         'attachment; filename="vi-VN-HoaiMyNeural.wav"'
     )
@@ -110,6 +137,38 @@ def test_voice_preview_endpoint_serves_a_registered_custom_preview(
 
     assert response.status_code == 200
     assert response.content == b"RIFFcustom"
+
+
+def test_preview_generation_rejects_a_planted_symlink_and_cleans_temp_files(
+    tmp_path, monkeypatch, caplog
+):
+    previews = tmp_path / "previews"
+    previews.mkdir()
+    outside = tmp_path / "outside.wav"
+    outside.write_bytes(b"outside bytes")
+    voice_id = "clone-safe"
+    write_wav(custom_voices.sample_path(voice_id), np.zeros(2400, dtype="<i2"), 24000)
+    custom_voices.register(voice_id, "Safe")
+    planted = previews / f"{voice_id}.wav"
+    try:
+        planted.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"Symlinks unavailable on this platform: {exc}")
+
+    class Synthesizer:
+        def synthesize(self, text, requested_voice_id):
+            return b"\x00\x00" * 2400
+
+    monkeypatch.setattr(type(settings), "previews_dir", property(lambda self: previews))
+    monkeypatch.setattr(voice_routes, "_clone_synthesizer", Synthesizer)
+
+    with caplog.at_level(logging.WARNING, logger=voice_routes.__name__):
+        voice_routes._generate_preview(voice_id)
+
+    assert outside.read_bytes() == b"outside bytes"
+    assert planted.is_symlink()
+    assert list(previews.iterdir()) == [planted]
+    assert "Không tạo được nghe thử" in caplog.text
 
 
 def test_voice_preview_endpoint_rejects_a_known_voice_without_a_preview(

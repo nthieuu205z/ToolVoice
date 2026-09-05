@@ -14,7 +14,7 @@ from pipeline import custom_voices
 from pipeline.audio import write_wav
 
 
-def _scope(spec_version: str = "2.4") -> dict:
+def _scope(spec_version: str = "2.4", headers: dict[str, str] | None = None) -> dict:
     return {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": spec_version},
@@ -25,13 +25,16 @@ def _scope(spec_version: str = "2.4") -> dict:
         "raw_path": b"/download",
         "query_string": b"",
         "root_path": "",
-        "headers": [],
+        "headers": [
+            (name.lower().encode("latin-1"), value.encode("latin-1"))
+            for name, value in (headers or {}).items()
+        ],
         "client": ("test", 1),
         "server": ("test", 80),
     }
 
 
-async def _response_body(response) -> bytes:
+async def _response_messages(response, headers: dict[str, str] | None = None) -> list[dict]:
     messages = []
 
     async def receive():
@@ -40,8 +43,23 @@ async def _response_body(response) -> bytes:
     async def send(message):
         messages.append(message)
 
-    await response(_scope(), receive, send)
+    await response(_scope(headers=headers), receive, send)
+    return messages
+
+
+async def _response_body(response, headers: dict[str, str] | None = None) -> bytes:
+    messages = await _response_messages(response, headers)
     return b"".join(message.get("body", b"") for message in messages)
+
+
+def _response_result(response, headers: dict[str, str] | None = None):
+    messages = asyncio.run(_response_messages(response, headers))
+    start = next(message for message in messages if message["type"] == "http.response.start")
+    response_headers = {
+        name.decode("latin-1"): value.decode("latin-1") for name, value in start["headers"]
+    }
+    body = b"".join(message.get("body", b"") for message in messages)
+    return start["status"], response_headers, body
 
 
 def _voice(voice_id: str = "clone-safe"):
@@ -141,6 +159,12 @@ def test_download_accepts_a_regular_result_file(tmp_path, monkeypatch):
     response = job_routes.download_video("job")
 
     assert response.path == video.resolve()
+    assert response.headers["accept-ranges"] == "bytes"
+    assert response.headers["content-length"] == "4"
+    assert response.headers["content-type"] == "video/mp4"
+    assert response.headers["content-disposition"] == 'attachment; filename="video_vi.mp4"'
+    assert response.headers["last-modified"]
+    assert response.headers["etag"]
     response.close()
 
 
@@ -162,6 +186,101 @@ def test_download_holds_the_validated_file_when_the_path_is_replaced(tmp_path, m
 
     assert asyncio.run(_response_body(response)) == b"safe result"
     assert response.file.closed is True
+
+
+@pytest.mark.parametrize(
+    ("range_header", "expected_body", "expected_content_range"),
+    [
+        pytest.param("bytes=2-5", b"2345", "bytes 2-5/10", id="bounded"),
+        pytest.param("bytes=6-", b"6789", "bytes 6-9/10", id="open-ended"),
+        pytest.param("bytes=-4", b"6789", "bytes 6-9/10", id="suffix"),
+    ],
+)
+def test_download_serves_byte_ranges_from_the_held_file(
+    tmp_path, monkeypatch, range_header, expected_body, expected_content_range
+):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"0123456789")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    status, headers, body = _response_result(
+        job_routes.download_video("job"), {"range": range_header}
+    )
+
+    assert status == 206
+    assert body == expected_body
+    assert headers["accept-ranges"] == "bytes"
+    assert headers["content-range"] == expected_content_range
+    assert headers["content-length"] == "4"
+
+
+def test_download_rejects_an_unsatisfiable_byte_range(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"0123456789")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    status, headers, body = _response_result(
+        job_routes.download_video("job"), {"range": "bytes=10-20"}
+    )
+
+    assert status == 416
+    assert headers["content-range"] == "bytes */10"
+    assert body == b""
+
+
+def test_download_rejects_a_malformed_byte_range(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"0123456789")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    status, _, _ = _response_result(
+        job_routes.download_video("job"), {"range": "items=2-5"}
+    )
+
+    assert status == 400
+
+
+def test_download_honors_a_matching_if_range_validator(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"0123456789")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+    response = job_routes.download_video("job")
+
+    status, headers, body = _response_result(
+        response,
+        {"range": "bytes=2-5", "if-range": response.headers["etag"]},
+    )
+
+    assert status == 206
+    assert headers["content-range"] == "bytes 2-5/10"
+    assert body == b"2345"
+
+
+def test_download_ignores_range_for_a_mismatching_if_range_validator(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"0123456789")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    status, headers, body = _response_result(
+        job_routes.download_video("job"),
+        {"range": "bytes=2-5", "if-range": '"different-etag"'},
+    )
+
+    assert status == 200
+    assert headers["accept-ranges"] == "bytes"
+    assert headers["content-length"] == "10"
+    assert "content-range" not in headers
+    assert body == b"0123456789"
 
 
 def test_download_closes_the_held_file_when_sending_raises(tmp_path, monkeypatch):
