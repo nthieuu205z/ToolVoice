@@ -67,10 +67,9 @@ def test_a_voice_from_the_other_provider_is_rejected(client, monkeypatch):
 
 
 def test_index_page_is_served_at_root(client):
-    # Không bám vào tên thương hiệu (thiết kế đổi được) — bám vào chức năng của trang.
     page = client.get("/").text
-    assert "Lồng tiếng" in page
-    assert 'src="app.js"' in page
+    assert 'id="uploadForm"' in page
+    assert 'src="app.js?v=' in page
 
 
 def test_current_job_is_empty_when_idle(client):
