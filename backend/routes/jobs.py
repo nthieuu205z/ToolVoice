@@ -120,11 +120,28 @@ def job_status(job_id: str) -> dict:
     return _require(job_id).snapshot()
 
 
+@router.get("/api/jobs/{job_id}/telemetry")
+def job_telemetry(job_id: str) -> dict:
+    payload = _require(job_id).snapshot()
+    payload["telemetry_only"] = True
+    return payload
+
+
 @router.post("/api/jobs/{job_id}/cancel")
 def cancel_job(job_id: str) -> dict:
     """Yêu cầu dừng. Pipeline dừng ở mốc an toàn gần nhất, không giết thread giữa chừng."""
     try:
         return manager.cancel(job_id).snapshot()
+    except LookupError:
+        raise HTTPException(404, "Không tìm thấy công việc này.") from None
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.delete("/api/jobs/{job_id}")
+def delete_job(job_id: str) -> dict:
+    try:
+        return {"deleted": manager.delete(job_id)}
     except LookupError:
         raise HTTPException(404, "Không tìm thấy công việc này.") from None
     except RuntimeError as exc:

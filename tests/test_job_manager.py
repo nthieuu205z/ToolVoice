@@ -5,6 +5,8 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
+import pytest
+
 from backend import job_manager as jm
 from backend.job_manager import Job, JobManager
 from pipeline.errors import NoSpeechDetectedError
@@ -130,3 +132,25 @@ def test_a_third_job_queues_behind_the_concurrency_cap(tmp_path, monkeypatch):
     for job in jobs:
         _wait(manager, job)
     assert all(j.status == "done" for j in jobs)
+
+
+def test_delete_removes_terminal_job_and_its_workdir(tmp_path):
+    manager = JobManager(max_workers=1)
+    workdir = tmp_path / "done"
+    workdir.mkdir()
+    (workdir / "output.mp4").write_bytes(b"video")
+    job = Job(id="done", filename="clip.mp4", workdir=workdir, voice_id="voice", status="done")
+    manager._jobs[job.id] = job
+
+    assert manager.delete(job.id) == "done"
+    assert manager.get(job.id) is None
+    assert not workdir.exists()
+
+
+def test_delete_rejects_active_job(tmp_path):
+    manager = JobManager(max_workers=1)
+    job = Job(id="live", filename="clip.mp4", workdir=tmp_path, voice_id="voice", status="running")
+    manager._jobs[job.id] = job
+
+    with pytest.raises(RuntimeError, match="đang chạy"):
+        manager.delete(job.id)

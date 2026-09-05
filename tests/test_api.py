@@ -18,6 +18,24 @@ def _put(job: Job) -> Job:
     return job
 
 
+def test_job_telemetry_route_returns_the_monitor_snapshot(client, tmp_path):
+    _put(Job(
+        id="telemetry-job",
+        filename="clip.mp4",
+        workdir=tmp_path,
+        voice_id="voice",
+        status="running",
+        started_at=100.0,
+        stage_started_at=110.0,
+    ))
+
+    response = client.get("/api/jobs/telemetry-job/telemetry")
+
+    assert response.status_code == 200
+    assert response.json()["job_id"] == "telemetry-job"
+    assert response.json()["telemetry_only"] is True
+
+
 @pytest.fixture
 def client():
     yield TestClient(app)
