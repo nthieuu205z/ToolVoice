@@ -6,8 +6,7 @@ import json
 import os
 import tempfile
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Request
 
 from backend.config import ROOT, settings
 
@@ -22,11 +21,6 @@ def _dotenv_quote(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-class GeminiSettingsPayload(BaseModel):
-    api_key: str = ""
-    backend: str = "developer"
-
-
 def _masked_status() -> dict:
     """Never include the actual API key in an HTTP response."""
     return {"configured": bool(settings.gemini_api_key), "backend": settings.gemini_backend}
@@ -38,15 +32,27 @@ def gemini_settings() -> dict:
 
 
 @router.post("/api/settings/gemini")
-def update_gemini_settings(payload: GeminiSettingsPayload) -> dict:
-    backend = payload.backend.strip().lower()
+async def update_gemini_settings(request: Request) -> dict:
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(400, "Dữ liệu cấu hình Gemini không hợp lệ.") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Dữ liệu cấu hình Gemini không hợp lệ.")
+
+    raw_api_key = payload.get("api_key", "")
+    raw_backend = payload.get("backend", "developer")
+    if not isinstance(raw_api_key, str) or not isinstance(raw_backend, str):
+        raise HTTPException(400, "Dữ liệu cấu hình Gemini không hợp lệ.")
+
+    backend = raw_backend.strip().lower()
     if backend not in _ALLOWED_BACKENDS:
         raise HTTPException(400, "Gemini backend phải là developer hoặc vertex.")
-    if len(payload.api_key) > _MAX_API_KEY_LENGTH:
+    if len(raw_api_key) > _MAX_API_KEY_LENGTH:
         raise HTTPException(400, "Gemini API key không được dài quá 512 ký tự.")
-    if any(char in payload.api_key for char in "\r\n"):
+    if any(char in raw_api_key for char in "\r\n"):
         raise HTTPException(400, "Gemini API key không được chứa ký tự xuống dòng.")
-    api_key = payload.api_key.strip()
+    api_key = raw_api_key.strip()
     if not api_key:
         raise HTTPException(400, "Hãy điền Gemini API key.")
 

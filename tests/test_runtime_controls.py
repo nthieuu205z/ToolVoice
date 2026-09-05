@@ -114,6 +114,80 @@ def test_gemini_replace_failure_is_sanitized_and_preserves_file_and_runtime(
     assert settings.gemini_backend == "developer"
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(
+            {"api_key": [_SECRET_MARKER], "backend": "developer"},
+            id="api-key-list",
+        ),
+        pytest.param(
+            {"api_key": {"secret": _SECRET_MARKER}, "backend": "developer"},
+            id="api-key-object",
+        ),
+        pytest.param({"api_key": 2712, "backend": "developer"}, id="api-key-number"),
+        pytest.param({"api_key": None, "backend": "developer"}, id="api-key-null"),
+        pytest.param({"api_key": True, "backend": "developer"}, id="api-key-boolean"),
+        pytest.param(
+            {"api_key": _SECRET_MARKER, "backend": [_SECRET_MARKER]},
+            id="backend-list",
+        ),
+        pytest.param([_SECRET_MARKER], id="top-level-list"),
+        pytest.param(_SECRET_MARKER, id="top-level-string"),
+        pytest.param(2712, id="top-level-number"),
+        pytest.param(None, id="top-level-null"),
+    ],
+)
+def test_gemini_malformed_body_is_sanitized_and_preserves_file_and_runtime(
+    tmp_path, client, monkeypatch, body
+):
+    import backend.routes.settings as settings_route
+
+    env_path = tmp_path / ".env"
+    original_content = (
+        'OTHER_SETTING=keep\nGEMINI_BACKEND=vertex\nGEMINI_API_KEY="existing-key"\n'
+    )
+    env_path.write_text(original_content, encoding="utf-8")
+    monkeypatch.setattr(settings_route, "ENV_PATH", env_path)
+    monkeypatch.setattr(settings, "gemini_api_key", "existing-key")
+    monkeypatch.setattr(settings, "gemini_backend", "vertex")
+
+    response = client.post("/api/settings/gemini", json=body)
+
+    assert _SECRET_MARKER not in response.text
+    assert response.status_code == 400
+    assert env_path.read_text(encoding="utf-8") == original_content
+    assert settings.gemini_api_key == "existing-key"
+    assert settings.gemini_backend == "vertex"
+
+
+def test_gemini_invalid_json_is_sanitized_and_preserves_file_and_runtime(
+    tmp_path, client, monkeypatch
+):
+    import backend.routes.settings as settings_route
+
+    env_path = tmp_path / ".env"
+    original_content = (
+        'OTHER_SETTING=keep\nGEMINI_BACKEND=vertex\nGEMINI_API_KEY="existing-key"\n'
+    )
+    env_path.write_text(original_content, encoding="utf-8")
+    monkeypatch.setattr(settings_route, "ENV_PATH", env_path)
+    monkeypatch.setattr(settings, "gemini_api_key", "existing-key")
+    monkeypatch.setattr(settings, "gemini_backend", "vertex")
+
+    response = client.post(
+        "/api/settings/gemini",
+        content=f'{{"api_key":"{_SECRET_MARKER}"',
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert _SECRET_MARKER not in response.text
+    assert response.status_code == 400
+    assert env_path.read_text(encoding="utf-8") == original_content
+    assert settings.gemini_api_key == "existing-key"
+    assert settings.gemini_backend == "vertex"
+
+
 def test_windows_tree_shutdown_uses_taskkill(monkeypatch):
     import backend.process_control as control
 
