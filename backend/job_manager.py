@@ -373,15 +373,22 @@ class JobManager:
 
     def delete(self, job_id: str) -> str:
         """Xóa một job terminal cùng toàn bộ thư mục output của nó."""
-        job = self.get(job_id)
-        if job is None:
-            raise LookupError(job_id)
         with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise LookupError(job_id)
             if job.status in ACTIVE_STATUSES:
                 raise RuntimeError("Công việc đang chạy, không thể xóa.")
             self._jobs.pop(job_id, None)
-            self._futures.pop(job_id, None)
-        shutil.rmtree(job.workdir, ignore_errors=True)
+            future = self._futures.pop(job_id, None)
+        try:
+            shutil.rmtree(job.workdir)
+        except Exception:
+            with self._lock:
+                self._jobs[job_id] = job
+                if future is not None:
+                    self._futures[job_id] = future
+            raise
         return job_id
 
     def _ensure_executor(self) -> ThreadPoolExecutor:
@@ -522,12 +529,16 @@ class JobManager:
                 continue
 
             if job.status == "cancelling":
-                job.status = "cancelled"
-                job.message = JobCancelledError.user_message
+                with job.telemetry_lock:
+                    job.message = JobCancelledError.user_message
+                    job.mark_finished("cancelled", job.message)
+                    job.status = "cancelled"
                 self._persist(job)
             elif job.status in ("queued", "running"):
-                job.status = "error"
-                job.message = _INTERRUPTED_MESSAGE
+                with job.telemetry_lock:
+                    job.message = _INTERRUPTED_MESSAGE
+                    job.mark_finished("error", job.message)
+                    job.status = "error"
                 self._persist(job)
 
             self._jobs[job.id] = job
