@@ -186,7 +186,7 @@ async def job_events(job_id: str) -> StreamingResponse:
 @router.get("/api/jobs/{job_id}/download/video")
 def download_video(job_id: str) -> FileResponse:
     job = _require_done(job_id)
-    path = Path(job.video_path)
+    path = _job_file(job, job.video_path)
     stem = Path(job.filename).stem
     return _serve(path, f"{stem}_vi{path.suffix}")
 
@@ -194,7 +194,20 @@ def download_video(job_id: str) -> FileResponse:
 @router.get("/api/jobs/{job_id}/download/srt")
 def download_srt(job_id: str) -> FileResponse:
     job = _require_done(job_id)
-    return _serve(Path(job.srt_path), f"{Path(job.filename).stem}_vi.srt")
+    return _serve(_job_file(job, job.srt_path), f"{Path(job.filename).stem}_vi.srt")
+
+
+def _job_file(job: Job, value: str) -> Path:
+    """Chỉ phục vụ file kết quả trực tiếp trong thư mục của chính job."""
+    try:
+        raw = Path(value)
+        root = job.workdir.resolve(strict=True)
+        path = raw.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        raise HTTPException(404, "Không tìm thấy file kết quả.") from None
+    if raw.is_symlink() or (path != root and root not in path.parents) or path.parent != root:
+        raise HTTPException(404, "Không tìm thấy file kết quả.")
+    return path
 
 
 def _serve(path: Path, download_name: str) -> FileResponse:
