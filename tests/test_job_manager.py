@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import threading
+from concurrent.futures import Future
 from pathlib import Path
+
+import pytest
 
 from backend import job_manager as jm
 from backend.job_manager import Job, JobManager
@@ -130,3 +133,63 @@ def test_a_third_job_queues_behind_the_concurrency_cap(tmp_path, monkeypatch):
     for job in jobs:
         _wait(manager, job)
     assert all(j.status == "done" for j in jobs)
+
+
+def test_delete_removes_terminal_job_and_its_workdir(tmp_path):
+    manager = JobManager(max_workers=1)
+    workdir = tmp_path / "done"
+    workdir.mkdir()
+    (workdir / "output.mp4").write_bytes(b"video")
+    job = Job(id="done", filename="clip.mp4", workdir=workdir, voice_id="voice", status="done")
+    manager._jobs[job.id] = job
+
+    assert manager.delete(job.id) == "done"
+    assert manager.get(job.id) is None
+    assert not workdir.exists()
+
+
+def test_delete_rejects_active_job(tmp_path):
+    manager = JobManager(max_workers=1)
+    job = Job(id="live", filename="clip.mp4", workdir=tmp_path, voice_id="voice", status="running")
+    manager._jobs[job.id] = job
+
+    with pytest.raises(RuntimeError, match="đang chạy"):
+        manager.delete(job.id)
+
+
+def test_delete_failure_keeps_terminal_job_retryable(tmp_path, monkeypatch):
+    manager = JobManager(max_workers=1)
+    workdir = tmp_path / "locked"
+    workdir.mkdir()
+    (workdir / "output.mp4").write_bytes(b"video")
+    job = Job(id="locked", filename="clip.mp4", workdir=workdir,
+              voice_id="voice", status="done")
+    future = Future()
+    manager._jobs[job.id] = job
+    manager._futures[job.id] = future
+
+    real_rmtree = jm.shutil.rmtree
+    attempts = 0
+
+    def fail_once(path, *, ignore_errors=False):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            if ignore_errors:
+                return None
+            raise PermissionError("workdir is locked")
+        return real_rmtree(path)
+
+    monkeypatch.setattr(jm.shutil, "rmtree", fail_once)
+
+    with pytest.raises(PermissionError, match="workdir is locked"):
+        manager.delete(job.id)
+
+    assert manager.get(job.id) is job
+    assert manager._futures[job.id] is future
+    assert workdir.exists()
+
+    assert manager.delete(job.id) == job.id
+    assert manager.get(job.id) is None
+    assert job.id not in manager._futures
+    assert not workdir.exists()

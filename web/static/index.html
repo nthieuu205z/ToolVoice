@@ -1,117 +1,134 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="vi">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sub. — Lồng tiếng Việt cho mọi video</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=Be+Vietnam+Pro:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#070a10">
+  <title>Sub. Ops — Video dubbing control room</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css?v=20260905-40">
 </head>
 <body>
-<div class="noise" aria-hidden="true"></div>
-<div class="glow" id="glow" aria-hidden="true"></div>
-
-<header class="topbar">
-  <a class="brand" href="#top">Sub<span class="b-dot">.</span></a>
-  <div class="top-right">
-    <span class="mock-badge" id="mockBadge" hidden><span class="mb-dot"></span>Chế độ xem thử</span>
-    <span class="top-note">Chạy trên máy của bạn · tối đa 2 video song song</span>
-  </div>
-</header>
-
-<section class="hero" id="top">
-  <h1 class="hero-title" aria-label="Sub">
-    <span class="ht-mask"><span class="ht" style="animation-delay:.05s">S</span></span><span class="ht-mask"><span class="ht" style="animation-delay:.13s">u</span></span><span class="ht-mask"><span class="ht" style="animation-delay:.21s">b</span></span><span class="ht-mask"><span class="ht ht-dot" style="animation-delay:.32s">.</span></span>
-  </h1>
-  <p class="hero-sub">Nhận diện lời thoại, dịch sang tiếng Việt, lồng giọng đọc thay audio gốc và xuất kèm phụ đề — tất cả chạy ngay trên máy bạn.</p>
-  <a class="hero-cta" href="#tool">Bắt đầu <span class="hc-arrow">↓</span></a>
-</section>
-
-<div class="marquee" aria-hidden="true">
-  <div class="marquee-track">
-    <span>Nhận diện</span><i>✦</i><span>Dịch thuật</span><i>✦</i><span>Lồng tiếng</span><i>✦</i><span>Phụ đề .srt</span><i>✦</i>
-    <span>Nhận diện</span><i>✦</i><span>Dịch thuật</span><i>✦</i><span>Lồng tiếng</span><i>✦</i><span>Phụ đề .srt</span><i>✦</i>
-    <span>Nhận diện</span><i>✦</i><span>Dịch thuật</span><i>✦</i><span>Lồng tiếng</span><i>✦</i><span>Phụ đề .srt</span><i>✦</i>
-  </div>
-</div>
-
-<main class="wrap" id="tool">
-
-  <!-- 01 · Thêm video -->
-  <section class="sec reveal" id="sec-upload">
-    <div class="sec-head"><span class="sec-num">01</span><h2>Thêm video</h2></div>
-    <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Chọn hoặc kéo thả video">
-      <input type="file" id="fileInput" accept="video/*" hidden>
-      <div class="dz-idle" id="dzIdle">
-        <div class="dz-big">Kéo thả video vào đây</div>
-        <div class="dz-small">hoặc bấm để chọn file · .mp4, .mkv… · tối đa 8 GB</div>
+  <a class="skip-link" href="#main-content">Bỏ qua điều hướng</a>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Điều hướng chính">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div><strong>Sub<span>.</span></strong><small>OPS CONSOLE</small></div>
       </div>
-      <div class="dz-file" id="dzFile" hidden>
-        <div class="dz-fileinfo">
-          <div class="dz-name" id="dzName"></div>
-          <div class="dz-meta" id="dzMeta"></div>
-        </div>
-        <button class="chip-x" id="dzRemove" type="button" aria-label="Bỏ chọn file">×</button>
+
+      <div class="sidebar-section">
+        <p class="eyebrow">WORKSPACE</p>
+        <nav class="nav-list">
+          <a class="nav-item active" href="#overview"><span class="icon icon-grid" aria-hidden="true"></span><span>Tổng quan</span><b id="navActiveCount" aria-label="Số job đang chạy">0</b></a>
+          <a class="nav-item" href="#jobs"><span class="icon icon-queue" aria-hidden="true"></span><span>Hàng đợi video</span><b id="navJobCount" aria-label="Tổng số job">0</b></a>
+          <a class="nav-item" href="#architecture"><span class="icon icon-nodes" aria-hidden="true"></span><span>Kiến trúc lõi</span></a>
+        </nav>
       </div>
-    </div>
-    <div class="upload-progress" id="uploadProgress" hidden>
-      <div class="up-row"><span id="upLabel">Đang tải lên…</span><span class="up-pct" id="upPct">0%</span></div>
-      <div class="bar"><div class="bar-fill" id="upBar"></div></div>
-      <div class="up-bytes" id="upBytes"></div>
-    </div>
-    <div class="start-row">
-      <button class="btn-primary" id="startBtn" disabled>Bắt đầu chuyển đổi</button>
-      <p class="start-hint" id="startHint"></p>
-    </div>
-  </section>
 
-  <!-- 02 · Model trên máy -->
-  <section class="sec reveal" id="sec-models" hidden>
-    <div class="sec-head"><span class="sec-num">02</span><h2>Model trên máy</h2></div>
-    <div class="model-grid" id="modelGrid"></div>
-  </section>
-
-  <!-- 03 · Giọng đọc -->
-  <section class="sec reveal" id="sec-voices">
-    <div class="sec-head"><span class="sec-num">03</span><h2>Chọn giọng đọc</h2></div>
-    <div class="voice-grid" id="voiceGrid"></div>
-    <div class="clone" id="cloneBlock" hidden>
-      <button class="clone-toggle" type="button" data-action="clone-toggle" id="cloneToggle"><span class="ct-plus">+</span> Nhân bản giọng của bạn</button>
-      <form class="clone-form" id="cloneForm" hidden>
-        <div class="cf-grid">
-          <label class="cf-field">
-            <span class="cf-label">Tên giọng</span>
-            <input type="text" id="cloneName" maxlength="40" placeholder="Ví dụ: Giọng của tôi" autocomplete="off">
-          </label>
-          <label class="cf-field cf-file">
-            <span class="cf-label">File audio mẫu</span>
-            <input type="file" id="cloneAudio" accept="audio/*" hidden>
-            <span class="cf-filebtn" id="cloneAudioLabel">Chọn file · 3–8 giây, một người nói, ít tạp âm</span>
-          </label>
-          <button class="btn-primary btn-sm" type="submit" data-action="clone-create" id="cloneCreate">Tạo giọng</button>
+      <div class="sidebar-section sidebar-system">
+        <p class="eyebrow">SYSTEM HEALTH</p>
+        <div class="health-stack" id="healthStack">
+          <div class="health-row"><span class="status-dot neutral"></span><span>Đang kiểm tra</span><em>—</em></div>
         </div>
-        <p class="clone-note">Chỉ dùng giọng bạn có quyền sử dụng.</p>
-        <p class="clone-msg" id="cloneMsg" hidden></p>
-      </form>
-    </div>
-  </section>
+      </div>
 
-  <!-- 04 · Danh sách video -->
-  <section class="sec reveal" id="sec-jobs">
-    <div class="sec-head"><span class="sec-num">04</span><h2>Video của bạn</h2></div>
-    <div class="job-list" id="jobList"></div>
-    <p class="jobs-empty" id="jobsEmpty">Chưa có video nào. Thêm video ở trên để bắt đầu.</p>
-  </section>
+      <div class="sidebar-footer">
+        <div class="local-badge"><span class="status-dot live"></span><div><strong>Local runtime</strong><small>Video không rời máy</small></div></div>
+        <p class="sidebar-version">SUB. / OPERATIONS 01</p>
+      </div>
+    </aside>
 
-</main>
+    <main class="main-content" id="main-content" tabindex="-1">
+      <header class="topbar">
+        <div>
+          <p class="breadcrumb"><span>WORKSPACE</span><i>/</i> TỔNG QUAN</p>
+          <h1>Phòng điều khiển</h1>
+        </div>
+        <div class="top-actions">
+          <div class="connection-pill" id="connectionPill"><span class="status-dot neutral"></span><span id="connectionText">Đang kết nối</span></div>
+          <button class="icon-button" id="refreshButton" type="button" aria-label="Làm mới dữ liệu" title="Làm mới dữ liệu"><span class="icon icon-refresh" aria-hidden="true"></span></button>
+        </div>
+      </header>
 
-<footer class="footer">
-  <span class="brand brand-sm">Sub<span class="b-dot">.</span></span>
-  <span>Chạy hoàn toàn trên máy của bạn — video không rời khỏi máy.</span>
-</footer>
+      <section class="overview-grid" id="overview" aria-labelledby="overview-title">
+        <div class="section-title-row"><div><p class="eyebrow">LIVE OPERATIONS</p><h2 id="overview-title">Trạng thái hệ thống</h2></div><span class="updated-label" id="lastUpdated">Chưa có dữ liệu</span></div>
+        <div class="metric-grid">
+          <article class="metric-card accent-blue"><div class="metric-top"><span class="metric-label">ĐANG CHẠY</span><span class="metric-glyph icon-pulse" aria-hidden="true"></span></div><strong class="metric-value" id="metricRunning">0</strong><span class="metric-note" id="metricRunningNote">Không có job hoạt động</span></article>
+          <article class="metric-card"><div class="metric-top"><span class="metric-label">ĐANG CHỜ</span><span class="metric-glyph icon-clock" aria-hidden="true"></span></div><strong class="metric-value" id="metricQueued">0</strong><span class="metric-note">Trong hàng đợi xử lý</span></article>
+          <article class="metric-card"><div class="metric-top"><span class="metric-label">ĐÃ HOÀN TẤT</span><span class="metric-glyph icon-check" aria-hidden="true"></span></div><strong class="metric-value" id="metricDone">0</strong><span class="metric-note">Kết quả sẵn sàng tải</span></article>
+          <article class="metric-card"><div class="metric-top"><span class="metric-label">TÀI NGUYÊN LOCAL</span><span class="metric-glyph icon-chip" aria-hidden="true"></span></div><strong class="metric-value metric-device" id="metricDevice">—</strong><span class="metric-note" id="metricEngine">Chưa có engine đang chạy</span></article>
+        </div>
+      </section>
 
-<script src="app.js"></script>
+      <section class="workspace-grid" aria-label="Job và pipeline">
+        <div class="panel jobs-panel" id="jobs">
+          <div class="panel-heading"><div><p class="eyebrow">VIDEO QUEUE</p><h2>Video đang xử lý</h2></div><div class="panel-heading-actions"><button class="text-button" id="newJobButton" type="button">↓ Đến khu upload</button><button class="text-button danger-text" id="shutdownButton" type="button">Tắt tool</button></div></div>
+          <div class="job-list" id="jobList"></div>
+          <div class="empty-state" id="jobsEmpty"><div class="empty-graphic" aria-hidden="true"><span></span><span></span><span></span></div><strong>Chưa có video trong hàng đợi</strong><p>Thêm một video để bắt đầu theo dõi pipeline trực tiếp.</p><button class="button primary small" type="button" data-action="open-upload">Đến khu upload</button></div>
+        </div>
+
+        <aside class="panel selected-panel" aria-labelledby="selected-title">
+          <div class="panel-heading compact"><div><p class="eyebrow">SELECTED JOB</p><h2 id="selected-title">Chi tiết job</h2></div><span class="live-label" id="selectedLiveLabel"><span class="status-dot neutral"></span> IDLE</span></div>
+          <div class="selected-empty" id="selectedEmpty"><span class="icon icon-target" aria-hidden="true"></span><p>Chọn một job bên trái để xem tiến trình chi tiết.</p></div>
+          <div id="selectedContent" hidden>
+            <div class="selected-file"><div class="file-icon icon-film" aria-hidden="true"></div><div class="selected-file-copy"><strong id="selectedFilename">—</strong><span id="selectedVoice">—</span></div></div>
+            <div class="selected-stage-summary"><div class="hero-progress-head"><span id="selectedStage">Đang chờ</span><strong id="selectedPercent">0%</strong></div><div class="progress-caption"><span id="selectedMessage">—</span><span id="selectedEta">ETA —</span></div></div>
+            <div class="stat-strip"><div><span>ĐÃ CHẠY</span><strong class="mono" id="selectedElapsed">00:00</strong></div><div><span>STAGE</span><strong class="mono" id="selectedStageElapsed">00:00</strong></div><div><span>SEGMENTS</span><strong class="mono" id="selectedSegments">—</strong></div></div>
+            <div class="runtime-card"><div class="runtime-head"><span class="eyebrow">RUNTIME</span><span class="runtime-live"><span class="status-dot live"></span> LIVE</span></div><div class="runtime-grid"><div><span>ENGINE</span><strong id="selectedEngine">—</strong></div><div><span>DEVICE</span><strong id="selectedDevice">—</strong></div><div><span>BATCH</span><strong class="mono" id="selectedBatch">—</strong></div></div></div>
+            <div class="selected-actions" id="selectedActions"></div>
+          </div>
+        </aside>
+      </section>
+
+      <section class="panel pipeline-panel" id="architecture" aria-labelledby="pipeline-title">
+        <div class="panel-heading"><div><p class="eyebrow">EXECUTION GRAPH</p><h2 id="pipeline-title">Pipeline lõi</h2></div><div class="graph-legend"><span><i class="legend-dot completed"></i>Đã xong</span><span><i class="legend-dot active"></i>Đang chạy</span><span><i class="legend-dot pending"></i>Chờ</span></div></div>
+        <div class="graph-scroll-frame">
+          <div class="graph-scroll-shell">
+            <div class="graph-track" id="pipelineGraph" role="list" aria-label="Các bước xử lý video">
+              <div class="graph-step" role="listitem"><div class="graph-node" data-stage="extract"><span class="node-index">01</span><span class="node-icon icon-upload" aria-hidden="true"></span><strong>Upload</strong><small>Input video</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="0"><span class="graph-flow"></span></span></div></div>
+              <div class="graph-step" role="listitem"><div class="graph-node" data-stage="transcribe"><span class="node-index">02</span><span class="node-icon icon-wave" aria-hidden="true"></span><strong>Whisper STT</strong><small>Nhận diện</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="1"><span class="graph-flow"></span></span></div></div>
+              <div class="graph-step" role="listitem"><div class="graph-node" data-stage="translate"><span class="node-index">03</span><span class="node-icon icon-language" aria-hidden="true"></span><strong>Gemini</strong><small>Dịch thuật</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="2"><span class="graph-flow"></span></span></div></div>
+              <div class="graph-step" role="listitem"><div class="graph-node" data-stage="synthesize"><span class="node-index">04</span><span class="node-icon icon-sound" aria-hidden="true"></span><strong>TTS Engine</strong><small id="graphTtsNote">Theo cấu hình job</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="3"><span class="graph-flow"></span></span></div></div>
+              <div class="graph-step" role="listitem"><div class="graph-node" data-stage="subtitle"><span class="node-index">05</span><span class="node-icon icon-caption" aria-hidden="true"></span><strong>Subtitle</strong><small>Phụ đề .srt</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="4"><span class="graph-flow"></span></span></div></div>
+              <div class="graph-step" role="listitem"><div class="graph-node" data-stage="assemble"><span class="node-index">06</span><span class="node-icon icon-layers" aria-hidden="true"></span><strong>Assemble</strong><small>Ghép audio</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="5"><span class="graph-flow"></span></span></div></div>
+              <div class="graph-step" role="listitem"><div class="graph-node" data-stage="mux"><span class="node-index">07</span><span class="node-icon icon-export" aria-hidden="true"></span><strong>Export</strong><small>Video hoàn tất</small></div></div>
+            </div>
+          </div>
+          <span class="graph-scroll-cue" aria-hidden="true">Kéo ngang để xem toàn bộ pipeline</span>
+        </div>
+        <div class="graph-detail" id="graphDetail"><span class="detail-pulse"></span><div><strong id="graphDetailTitle">Chưa có job đang chạy</strong><p id="graphDetailText">Sơ đồ sẽ phát sáng theo từng bước khi pipeline hoạt động.</p></div><span class="mono" id="graphDetailTime">—</span></div>
+      </section>
+
+      <section class="panel upload-panel primary-upload-panel" id="uploadPanel" aria-labelledby="upload-title">
+        <div class="panel-heading compact"><div><p class="eyebrow">NEW JOB</p><h2 id="upload-title">Tải video để bắt đầu</h2></div><span class="upload-step">01 / 01</span></div>
+        <form id="uploadForm" novalidate><div class="upload-error-summary" id="uploadError" role="alert" tabindex="-1" hidden><strong>Chưa thể bắt đầu</strong><span id="uploadErrorText"></span></div><label class="dropzone" id="dropzone" for="videoInput" tabindex="0"><input id="videoInput" type="file" accept="video/*,.mp4,.mkv,.mov,.avi,.webm" aria-describedby="dropHint uploadErrorText"><span class="drop-icon icon-upload" aria-hidden="true"></span><strong id="dropTitle">Kéo thả video vào đây</strong><small id="dropHint">hoặc bấm để chọn · MP4, MKV, MOV, AVI, WebM · tối đa 8 GB</small><span class="selected-upload" id="selectedUpload" hidden></span></label><label class="field-label" for="voiceSelect">Giọng đọc</label><select id="voiceSelect" required aria-describedby="uploadHint uploadErrorText"><option value="">Đang tải danh sách…</option></select><div class="upload-footer"><span id="uploadHint">Chọn video và giọng đọc để bắt đầu.</span><button class="button primary" type="submit" id="startButton" disabled>Bắt đầu xử lý <span class="icon icon-arrow" aria-hidden="true"></span></button></div><div class="upload-progress" id="uploadProgress" hidden><div><span id="uploadProgressLabel">Đang tải video lên</span><strong id="uploadPercent">0%</strong></div><div class="progress-track"><span id="uploadBar"></span></div><button class="upload-cancel" id="cancelUploadButton" type="button">Hủy tải lên</button></div></form>
+      </section>
+
+      <section class="panel voice-panel" id="voiceSettings" aria-labelledby="voice-title">
+        <div class="panel-heading compact"><div><p class="eyebrow">VOICE LAB</p><h2 id="voice-title">Giọng đọc</h2></div><span class="upload-step">LOCAL VOICE</span></div>
+        <div class="voice-toolbar"><div><strong>Giọng nhân bản</strong><p>Tạo một giọng mới từ audio mẫu. Engine nhân bản chạy local theo cấu hình hiện tại.</p></div><div class="voice-toolbar-actions"><span class="voice-count" id="voiceCount">0 giọng</span><button class="button small" id="toggleVoiceForm" type="button" aria-expanded="false">+ Tạo giọng</button></div></div>
+        <div class="voice-list" id="voiceList"><div class="event-empty">Đang tải danh sách giọng…</div></div>
+        <form class="voice-form" id="voiceForm" hidden>
+          <div class="voice-form-grid"><label class="field-wrap"><span class="field-label">Tên giọng</span><input id="cloneName" name="name" type="text" maxlength="40" placeholder="Ví dụ: Giọng của tôi" required></label><label class="field-wrap"><span class="field-label">Audio mẫu</span><input id="cloneAudio" name="audio" type="file" accept="audio/*" required></label><button class="button primary" id="createVoiceButton" type="submit">Tạo giọng</button></div>
+          <p class="form-hint" id="voiceFormHint">Nên dùng audio 3–8 giây, một người nói, ít tạp âm.</p>
+        </form>
+      </section>
+
+      <section class="lower-grid">
+        <div class="panel event-panel"><div class="panel-heading compact"><div><p class="eyebrow">EVENT STREAM</p><h2>Nhật ký hoạt động</h2></div><button class="text-button" id="clearEvents" type="button">Xóa hiển thị</button></div><div class="event-list" id="eventList"><div class="event-empty">Chưa có sự kiện mới.</div></div></div>
+        <div class="panel session-panel"><div class="panel-heading compact"><div><p class="eyebrow">SESSION</p><h2>Phiên làm việc</h2></div></div><p class="session-copy">Mọi video được xử lý trên máy local. Sự kiện của job đang chọn được cập nhật liên tục qua SSE.</p></div>
+      </section>
+
+      <section class="panel settings-panel" id="settings" aria-labelledby="settings-title"><div class="panel-heading compact"><div><p class="eyebrow">RUNTIME SETTINGS</p><h2 id="settings-title">Cấu hình Gemini</h2></div><span class="settings-status" id="geminiSettingsStatus">Chưa cấu hình</span></div><form id="geminiSettingsForm" class="settings-form" novalidate><label class="field-wrap"><span class="field-label">Gemini API key</span><input id="geminiApiKey" name="api_key" type="password" autocomplete="new-password" placeholder="Dán key Gemini tại đây" required></label><label class="field-wrap"><span class="field-label">Endpoint</span><select id="geminiBackend" name="backend"><option value="developer">Developer API / AI Studio</option><option value="vertex">Vertex AI Express Mode</option></select></label><button class="button primary" type="submit">Lưu cấu hình</button></form><p class="form-hint" id="geminiSettingsHint">Key được lưu vào .env local. Giao diện không hiển thị lại key sau khi lưu.</p></section>
+
+      <footer class="footer"><span>SUB. OPS CONSOLE</span><span>Local-first video dubbing · TTS / STT / Translation</span><span class="mono">v2.0.0</span></footer>
+    </main>
+  </div>
+  <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+  <div class="sr-status" id="srStatus" role="status" aria-live="polite" aria-atomic="true"></div>
+  <script src="app.js?v=20260905-40"></script>
 </body>
 </html>

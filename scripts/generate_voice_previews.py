@@ -3,7 +3,7 @@
 
     ./.venv/bin/python scripts/generate_voice_previews.py
 
-Ghi ra web/static/previews/<VoiceId>.wav bằng đúng nhà cung cấp đang cấu hình
+Ghi ra previews/<VoiceId>.wav (ngoài web/static) bằng đúng nhà cung cấp đang cấu hình
 (TTS_PROVIDER trong .env). Dùng --force để tạo lại các file đã có.
 """
 

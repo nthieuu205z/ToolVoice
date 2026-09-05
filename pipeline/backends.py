@@ -94,6 +94,20 @@ class CompositeBackend:
     def synthesize_batch(self, texts: list[str], voice_id: str) -> list[bytes]:
         return self._synthesizer.synthesize_batch(texts, voice_id)
 
+    def runtime_info(self) -> tuple[str, str, int]:
+        synthesizer = self._synthesizer
+        engine = getattr(synthesizer, "engine", synthesizer.__class__.__name__)
+        device = getattr(synthesizer, "device", "")
+        batch = getattr(synthesizer, "batch_size", 0)
+        engine = engine() if callable(engine) else engine
+        device = device() if callable(device) else device
+        batch = batch() if callable(batch) else batch
+        try:
+            normalized_batch = max(0, int(str(batch or 0)))
+        except (TypeError, ValueError):
+            normalized_batch = 0
+        return str(engine), str(device), normalized_batch
+
     @property
     def stt_batch_size(self) -> int:
         """0 = nhà cung cấp nhận diện này không gộp lô được (Gemini, Whisper/CPU)."""

@@ -1,0 +1,623 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from pathlib import Path
+
+import numpy as np
+import pytest
+from fastapi import HTTPException
+from starlette.responses import FileResponse
+
+from backend import secure_files
+from backend.routes import jobs as job_routes
+from pipeline import custom_voices
+from pipeline.audio import write_wav
+
+
+def _scope(
+    spec_version: str = "2.4",
+    headers: dict[str, str] | None = None,
+    method: str = "GET",
+) -> dict:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": spec_version},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": "/download",
+        "raw_path": b"/download",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (name.lower().encode("latin-1"), value.encode("latin-1"))
+            for name, value in (headers or {}).items()
+        ],
+        "client": ("test", 1),
+        "server": ("test", 80),
+    }
+
+
+async def _response_messages(
+    response,
+    headers: dict[str, str] | None = None,
+    method: str = "GET",
+) -> list[dict]:
+    messages = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        messages.append(message)
+
+    await response(_scope(headers=headers, method=method), receive, send)
+    return messages
+
+
+async def _response_body(response, headers: dict[str, str] | None = None) -> bytes:
+    messages = await _response_messages(response, headers)
+    return b"".join(message.get("body", b"") for message in messages)
+
+
+def _response_result(
+    response,
+    headers: dict[str, str] | None = None,
+    method: str = "GET",
+):
+    messages = asyncio.run(_response_messages(response, headers, method))
+    start = next(message for message in messages if message["type"] == "http.response.start")
+    response_headers = {
+        name.decode("latin-1"): value.decode("latin-1") for name, value in start["headers"]
+    }
+    body = b"".join(message.get("body", b"") for message in messages)
+    return start["status"], response_headers, body
+
+
+def _voice(voice_id: str = "clone-safe"):
+    write_wav(custom_voices.sample_path(voice_id), np.zeros(2400, dtype="<i2"), 24000)
+    return custom_voices.register(voice_id, "Safe")
+
+
+def test_custom_voice_ids_are_restricted_to_clone_slugs():
+    assert custom_voices.is_custom("clone-safe") is True
+    assert custom_voices.is_custom("clone-../outside") is False
+    assert custom_voices.is_custom("clone-a/b") is False
+    assert custom_voices.is_custom("clone-a\\b") is False
+
+
+def test_sample_path_rejects_a_non_clone_id():
+    with pytest.raises(ValueError):
+        custom_voices.sample_path("clone-../outside")
+
+
+def test_register_rejects_invalid_id_and_missing_sample(tmp_path, monkeypatch):
+    monkeypatch.setattr(custom_voices, "_dir", tmp_path)
+    with pytest.raises(ValueError):
+        custom_voices.register("clone-../outside", "Bad")
+    with pytest.raises(FileNotFoundError):
+        custom_voices.register("clone-valid", "Missing")
+
+
+def test_malformed_voice_metadata_is_ignored(tmp_path, monkeypatch):
+    monkeypatch.setattr(custom_voices, "_dir", tmp_path)
+    (tmp_path / "clone-safe.json").write_text(
+        json.dumps({"id": "clone-../outside", "display_name": "bad"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "outside.wav").write_bytes(b"not a voice")
+
+    assert custom_voices.list_custom() == []
+
+
+def test_registered_voice_id_must_match_metadata_filename(tmp_path, monkeypatch):
+    monkeypatch.setattr(custom_voices, "_dir", tmp_path)
+    (tmp_path / "clone-safe.wav").write_bytes(b"sample")
+    (tmp_path / "clone-safe.json").write_text(
+        json.dumps({"id": "clone-other", "display_name": "bad"}),
+        encoding="utf-8",
+    )
+
+    assert custom_voices.list_custom() == []
+
+
+def _job_class(job_dir: Path, video_path: Path):
+    target = str(video_path)
+
+    class Job:
+        status = "done"
+        workdir = job_dir
+        video_path = target
+        filename = "video.mp4"
+
+    return Job
+
+
+def test_download_rejects_a_path_outside_the_job_directory(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("private", encoding="utf-8")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, outside)())
+
+    with pytest.raises(HTTPException) as excinfo:
+        job_routes.download_video("job")
+
+    assert excinfo.value.status_code == 404
+
+
+def test_download_rejects_a_symlink_inside_job_directory(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("private", encoding="utf-8")
+    link = job_dir / "output.mp4"
+    link.symlink_to(outside)
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, link)())
+
+    with pytest.raises(HTTPException) as excinfo:
+        job_routes.download_video("job")
+
+    assert excinfo.value.status_code == 404
+
+
+def test_download_accepts_a_regular_result_file(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"safe")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    response = job_routes.download_video("job")
+
+    assert response.path == video.resolve()
+    assert response.headers["accept-ranges"] == "bytes"
+    assert response.headers["content-length"] == "4"
+    assert response.headers["content-type"] == "video/mp4"
+    assert response.headers["content-disposition"] == 'attachment; filename="video_vi.mp4"'
+    assert response.headers["last-modified"]
+    assert response.headers["etag"]
+    response.close()
+
+
+def test_download_holds_the_validated_file_when_the_path_is_replaced(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"safe result")
+    replacement = tmp_path / "outside.mp4"
+    replacement.write_bytes(b"outside bytes")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    response = job_routes.download_video("job")
+    try:
+        os.replace(replacement, video)
+    except PermissionError:
+        # Windows holds the validated file without delete sharing, so replacement is denied.
+        pass
+
+    assert asyncio.run(_response_body(response)) == b"safe result"
+    assert response.file.closed is True
+
+
+def test_download_response_never_delegates_to_starlette_file_response_call(
+    tmp_path, monkeypatch
+):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"held bytes")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    async def fail_if_delegated(response, scope, receive, send):
+        raise AssertionError("delegated to Starlette FileResponse.__call__")
+
+    monkeypatch.setattr(FileResponse, "__call__", fail_if_delegated)
+
+    status, _, body = _response_result(job_routes.download_video("job"))
+
+    assert status == 200
+    assert body == b"held bytes"
+
+
+@pytest.mark.parametrize(
+    ("range_header", "expected_body", "expected_content_range"),
+    [
+        pytest.param("bytes=2-5", b"2345", "bytes 2-5/10", id="bounded"),
+        pytest.param("bytes=6-", b"6789", "bytes 6-9/10", id="open-ended"),
+        pytest.param("bytes=-4", b"6789", "bytes 6-9/10", id="suffix"),
+    ],
+)
+def test_download_serves_byte_ranges_from_the_held_file(
+    tmp_path, monkeypatch, range_header, expected_body, expected_content_range
+):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"0123456789")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    status, headers, body = _response_result(
+        job_routes.download_video("job"), {"range": range_header}
+    )
+
+    assert status == 206
+    assert body == expected_body
+    assert headers["accept-ranges"] == "bytes"
+    assert headers["content-range"] == expected_content_range
+    assert headers["content-length"] == "4"
+
+
+def test_download_rejects_an_unsatisfiable_byte_range(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"0123456789")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    status, headers, body = _response_result(
+        job_routes.download_video("job"), {"range": "bytes=10-20"}
+    )
+
+    assert status == 416
+    assert headers["content-range"] == "bytes */10"
+    assert body == b""
+
+
+def test_download_rejects_a_malformed_byte_range(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"0123456789")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    status, _, _ = _response_result(
+        job_routes.download_video("job"), {"range": "items=2-5"}
+    )
+
+    assert status == 400
+
+
+def test_download_honors_a_matching_if_range_validator(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"0123456789")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+    response = job_routes.download_video("job")
+
+    status, headers, body = _response_result(
+        response,
+        {"range": "bytes=2-5", "if-range": response.headers["etag"]},
+    )
+
+    assert status == 206
+    assert headers["content-range"] == "bytes 2-5/10"
+    assert body == b"2345"
+
+
+def test_download_ignores_range_for_a_mismatching_if_range_validator(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"0123456789")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    status, headers, body = _response_result(
+        job_routes.download_video("job"),
+        {"range": "bytes=2-5", "if-range": '"different-etag"'},
+    )
+
+    assert status == 200
+    assert headers["accept-ranges"] == "bytes"
+    assert headers["content-length"] == "10"
+    assert "content-range" not in headers
+    assert body == b"0123456789"
+
+
+def test_download_serves_multiple_ranges_from_the_held_file(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"0123456789")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    status, headers, body = _response_result(
+        job_routes.download_video("job"), {"range": "bytes=0-1,8-9"}
+    )
+
+    assert status == 206
+    assert headers["content-type"].startswith("multipart/byteranges; boundary=")
+    assert int(headers["content-length"]) == len(body)
+    assert b"Content-Range: bytes 0-1/10\r\n\r\n01\r\n" in body
+    assert b"Content-Range: bytes 8-9/10\r\n\r\n89\r\n" in body
+
+
+@pytest.mark.parametrize(
+    ("request_headers", "expected_status", "expected_length", "expected_content_range"),
+    [
+        pytest.param({}, 200, "10", None, id="full"),
+        pytest.param(
+            {"range": "bytes=2-5"},
+            206,
+            "4",
+            "bytes 2-5/10",
+            id="range",
+        ),
+    ],
+)
+def test_download_head_preserves_get_headers_without_a_body(
+    tmp_path,
+    monkeypatch,
+    request_headers,
+    expected_status,
+    expected_length,
+    expected_content_range,
+):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"0123456789")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    status, headers, body = _response_result(
+        job_routes.download_video("job"), request_headers, method="HEAD"
+    )
+
+    assert status == expected_status
+    assert headers["content-length"] == expected_length
+    assert headers.get("content-range") == expected_content_range
+    assert body == b""
+
+
+def test_owned_writer_never_publishes_a_swapped_source_path(tmp_path, monkeypatch):
+    root = tmp_path / "previews"
+    root.mkdir()
+    outside = tmp_path / "outside.wav"
+    outside.write_bytes(b"outside bytes")
+    target = root / "preview.wav"
+    probe = root / "probe.wav"
+    try:
+        probe.symlink_to(outside)
+        probe.unlink()
+    except OSError as exc:
+        pytest.skip(f"Symlinks unavailable on this platform: {exc}")
+
+    real_replace = os.replace
+    source_swap_attempted = False
+
+    def swap_source_before_replace(source, destination, *args, **kwargs):
+        nonlocal source_swap_attempted
+        destination_matches = (
+            destination == target.name
+            if kwargs.get("dst_dir_fd") is not None
+            else Path(destination) == target
+        )
+        if destination_matches:
+            source_swap_attempted = True
+            source_dir_fd = kwargs.get("src_dir_fd")
+            if source_dir_fd is None:
+                Path(source).unlink()
+                Path(source).symlink_to(outside)
+            else:
+                os.unlink(source, dir_fd=source_dir_fd)
+                os.symlink(outside, source, dir_fd=source_dir_fd)
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(secure_files.os, "replace", swap_source_before_replace)
+
+    with secure_files.atomic_owned_file(root, target) as file:
+        file.write(b"safe preview")
+
+    assert source_swap_attempted is False
+    assert target.is_symlink() is False
+    assert target.read_bytes() == b"safe preview"
+    assert outside.read_bytes() == b"outside bytes"
+
+
+def test_owned_writer_creates_a_new_direct_file_exclusively(tmp_path):
+    root = tmp_path / "previews"
+    root.mkdir()
+    target = root / "preview.wav"
+
+    with secure_files.atomic_owned_file(root, target) as file:
+        file.write(b"safe preview")
+
+    assert target.read_bytes() == b"safe preview"
+    assert target.stat().st_nlink == 1
+
+
+def test_owned_writer_rejects_an_existing_regular_file_without_modifying_it(tmp_path):
+    root = tmp_path / "previews"
+    root.mkdir()
+    target = root / "preview.wav"
+    target.write_bytes(b"existing preview")
+
+    error = None
+    try:
+        with secure_files.atomic_owned_file(root, target) as file:
+            file.write(b"replacement preview")
+    except OSError as exc:
+        error = exc
+
+    assert target.read_bytes() == b"existing preview"
+    assert isinstance(error, FileExistsError)
+
+
+def test_owned_writer_rejects_a_planted_hard_link_without_modifying_it(tmp_path):
+    root = tmp_path / "previews"
+    root.mkdir()
+    outside = tmp_path / "outside.wav"
+    outside.write_bytes(b"outside bytes")
+    target = root / "preview.wav"
+    try:
+        os.link(outside, target)
+    except OSError as exc:
+        pytest.skip(f"Hard links unavailable on this platform: {exc}")
+
+    error = None
+    try:
+        with secure_files.atomic_owned_file(root, target) as file:
+            file.write(b"replacement preview")
+    except OSError as exc:
+        error = exc
+
+    assert outside.read_bytes() == b"outside bytes"
+    assert target.samefile(outside)
+    assert isinstance(error, FileExistsError)
+
+
+def test_owned_writer_handles_its_new_entry_safely_when_writing_fails(tmp_path):
+    root = tmp_path / "previews"
+    root.mkdir()
+    target = root / "preview.wav"
+
+    with pytest.raises(RuntimeError, match="synthesis failed"):
+        with secure_files.atomic_owned_file(root, target) as file:
+            file.write(b"partial preview")
+            raise RuntimeError("synthesis failed")
+
+    if os.name == "nt":
+        assert target.exists() is False
+    else:
+        assert target.read_bytes() == b"partial preview"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX pathname-cleanup regression")
+def test_posix_failed_write_never_unlinks_a_substituted_entry(tmp_path, monkeypatch):
+    root = tmp_path / "previews"
+    root.mkdir()
+    target = root / "preview.wav"
+    displaced_partial = root / "displaced-partial.wav"
+    replacement = tmp_path / "unrelated.wav"
+    replacement.write_bytes(b"unrelated bytes")
+
+    real_stat = os.stat
+    write_failed = False
+    substituted = False
+
+    def substitute_after_cleanup_stat(path, *args, **kwargs):
+        nonlocal substituted
+        result = real_stat(path, *args, **kwargs)
+        if (
+            write_failed
+            and not substituted
+            and path == target.name
+            and kwargs.get("dir_fd") is not None
+        ):
+            root_fd = kwargs["dir_fd"]
+            os.rename(
+                target.name,
+                displaced_partial.name,
+                src_dir_fd=root_fd,
+                dst_dir_fd=root_fd,
+            )
+            os.link(replacement, target.name, dst_dir_fd=root_fd)
+            substituted = True
+        return result
+
+    monkeypatch.setattr(secure_files.os, "stat", substitute_after_cleanup_stat)
+
+    with pytest.raises(RuntimeError, match="synthesis failed"):
+        with secure_files.atomic_owned_file(root, target) as file:
+            file.write(b"partial preview")
+            write_failed = True
+            raise RuntimeError("synthesis failed")
+
+    if substituted:
+        assert target.exists(), "pathname cleanup unlinked the unrelated replacement"
+        assert target.samefile(replacement)
+        assert target.read_bytes() == b"unrelated bytes"
+    else:
+        assert target.read_bytes() == b"partial preview"
+        assert displaced_partial.exists() is False
+    assert substituted is False
+    assert replacement.read_bytes() == b"unrelated bytes"
+
+
+def test_download_closes_the_held_file_when_sending_raises(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"safe result")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+    response = job_routes.download_video("job")
+
+    async def fail_send():
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            if message["type"] == "http.response.body":
+                raise RuntimeError("send failed")
+
+        await response(_scope(), receive, send)
+
+    with pytest.raises(RuntimeError, match="send failed"):
+        asyncio.run(fail_send())
+    assert response.file.closed is True
+
+
+def test_download_disconnect_cancels_stream_and_closes_handle_promptly(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"0123456789")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+    response = job_routes.download_video("job")
+    response.chunk_size = 1
+
+    async def disconnect_during_first_chunk():
+        first_chunk = asyncio.Event()
+        never = asyncio.Event()
+
+        async def receive():
+            await first_chunk.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("more_body"):
+                first_chunk.set()
+                await never.wait()
+
+        await asyncio.wait_for(response(_scope(), receive, send), timeout=0.5)
+
+    asyncio.run(disconnect_during_first_chunk())
+    assert response.file.closed is True
+
+
+def test_download_closes_the_held_file_on_disconnect(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"safe result")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+    response = job_routes.download_video("job")
+
+    async def disconnect():
+        async def receive():
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            pass
+
+        await response(_scope("2.3"), receive, send)
+
+    asyncio.run(disconnect())
+    assert response.file.closed is True
+
+
+def test_download_rejects_a_nested_result_file(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    nested = job_dir / "nested"
+    nested.mkdir(parents=True)
+    video = nested / "output.mp4"
+    video.write_bytes(b"safe")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    with pytest.raises(HTTPException) as excinfo:
+        job_routes.download_video("job")
+
+    assert excinfo.value.status_code == 404

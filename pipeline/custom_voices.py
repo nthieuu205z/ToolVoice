@@ -24,6 +24,7 @@ log = logging.getLogger(__name__)
 
 # Tiền tố phân biệt giọng nhân bản với giọng dựng sẵn trong mọi voice_id.
 PREFIX = "clone-"
+_VOICE_ID_RE = re.compile(r"^clone-[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 _dir: Path | None = None
 
@@ -57,12 +58,18 @@ def slugify(name: str) -> str:
 
 
 def is_custom(voice_id: str) -> bool:
-    return voice_id.startswith(PREFIX)
+    return bool(_VOICE_ID_RE.fullmatch(voice_id))
+
+
+def _safe_voice_path(voice_id: str, suffix: str) -> Path:
+    if not is_custom(voice_id):
+        raise ValueError(f"ID giọng nhân bản không hợp lệ: {voice_id}")
+    return _store() / f"{voice_id}{suffix}"
 
 
 def sample_path(voice_id: str) -> Path:
     """File audio mẫu mà engine sẽ học giọng từ đó."""
-    return _store() / f"{voice_id}.wav"
+    return _safe_voice_path(voice_id, ".wav")
 
 
 def list_custom() -> list[CustomVoice]:
@@ -79,6 +86,9 @@ def list_custom() -> list[CustomVoice]:
             )
         except (OSError, ValueError, KeyError) as exc:
             log.warning("Bỏ qua giọng nhân bản hỏng tại %s: %s", meta, exc)
+            continue
+        if voice.id != meta.stem or not is_custom(voice.id):
+            log.warning("Bỏ qua id giọng không hợp lệ tại %s", meta)
             continue
         if not (meta.parent / f"{voice.id}.wav").is_file():
             continue  # mất file mẫu thì giọng vô dụng — coi như không tồn tại
@@ -109,8 +119,13 @@ def unique_id(name: str) -> str:
 
 def register(voice_id: str, display_name: str) -> CustomVoice:
     """Ghi metadata. File mẫu phải đã nằm sẵn ở `sample_path(voice_id)`."""
+    if not is_custom(voice_id):
+        raise ValueError(f"ID giọng nhân bản không hợp lệ: {voice_id}")
+    sample = _store() / f"{voice_id}.wav"
+    if not sample.is_file():
+        raise FileNotFoundError(sample)
     voice = CustomVoice(id=voice_id, display_name=display_name, created_at=time.time())
-    (_store() / f"{voice_id}.json").write_text(
+    _safe_voice_path(voice_id, ".json").write_text(
         json.dumps({"id": voice.id, "display_name": voice.display_name,
                     "created_at": voice.created_at}, ensure_ascii=False),
         encoding="utf-8",
@@ -119,11 +134,12 @@ def register(voice_id: str, display_name: str) -> CustomVoice:
 
 
 def remove(voice_id: str) -> bool:
+    if not is_custom(voice_id):
+        return False
     if get(voice_id) is None:
         return False
-    store = _store()
-    (store / f"{voice_id}.json").unlink(missing_ok=True)
-    (store / f"{voice_id}.wav").unlink(missing_ok=True)
+    _safe_voice_path(voice_id, ".json").unlink(missing_ok=True)
+    _safe_voice_path(voice_id, ".wav").unlink(missing_ok=True)
     # Bia mộ giữ chỗ id để unique_id không cấp lại (xem docstring của unique_id).
-    (store / f"{voice_id}.tombstone").touch()
+    _safe_voice_path(voice_id, ".tombstone").touch()
     return True

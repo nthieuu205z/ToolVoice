@@ -48,6 +48,6 @@ def test_frontend_stage_labels_match_the_backend_order():
     from pathlib import Path
 
     js = Path("web/static/app.js").read_text(encoding="utf-8")
-    # Không bám vào độ thụt lề — chỉ cần các cặp `stage: "Đang…"` đúng và đủ thứ tự.
-    order = re.findall(r"^\s*(\w+): \"Đang", js, flags=re.MULTILINE)
+    # Frontend mới dùng metadata có nhãn tiếng Việt thay vì map trạng thái cũ.
+    order = re.findall(r"^\s{2}(\w+): \{ label: \"(?:Tách|Nhận|Dịch|Tạo|Căn|Đặt|Ghép|Xuất)", js, flags=re.MULTILINE)
     assert order == STAGES

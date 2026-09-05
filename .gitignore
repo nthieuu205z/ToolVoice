@@ -10,6 +10,7 @@ jobs/
 bin/
 web/static/previews/*.wav
 web/static/previews/*.mp3
+/previews/
 tests/fixtures/*.mp4
 !tests/fixtures/.gitkeep
 custom_voices/

@@ -21,7 +21,7 @@ Copy cả thư mục `ToolVietSub` sang máy mới, **trừ** các thư mục sa
 | toàn bộ code | `.venv/` — binary của macOS, vô dụng trên Windows |
 | `.env` — chứa khóa API, giữ kín, đừng gửi qua kênh công khai | `jobs/` — kết quả cũ, chép hay không tùy bạn |
 | `custom_voices/` — giọng nhân bản của bạn nằm ở đây, sang máy mới dùng tiếp được | `__pycache__/` |
-| `web/static/previews/` — file nghe thử của giọng (tùy chọn) | cache Hugging Face (`~/.cache/huggingface`) — dùng symlink kiểu Mac, chép sang Windows sẽ hỏng; tải lại sạch hơn |
+| `previews/` — file nghe thử của giọng, chỉ phục vụ qua API bảo vệ (tùy chọn) | cache Hugging Face (`~/.cache/huggingface`) — dùng symlink kiểu Mac, chép sang Windows sẽ hỏng; tải lại sạch hơn |
 
 ## 2. Cài công cụ nền
 

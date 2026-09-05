@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import threading
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -18,6 +22,24 @@ def _put(job: Job) -> Job:
     return job
 
 
+def test_job_telemetry_route_returns_the_monitor_snapshot(client, tmp_path):
+    _put(Job(
+        id="telemetry-job",
+        filename="clip.mp4",
+        workdir=tmp_path,
+        voice_id="voice",
+        status="running",
+        started_at=100.0,
+        stage_started_at=110.0,
+    ))
+
+    response = client.get("/api/jobs/telemetry-job/telemetry")
+
+    assert response.status_code == 200
+    assert response.json()["job_id"] == "telemetry-job"
+    assert response.json()["telemetry_only"] is True
+
+
 @pytest.fixture
 def client():
     yield TestClient(app)
@@ -30,7 +52,9 @@ def test_voices_endpoint_shape_matches_frontend_expectations(client):
     # Tính trong thân test: danh sách giọng phụ thuộc kho giọng nhân bản mà fixture
     # autouse đã cách ly — VOICES ở cấp module được tính TRƯỚC khi fixture chạy.
     assert len(body) == len(voices_for(settings.tts_provider))
-    assert set(body[0]) == {"id", "display_name", "preview_url", "custom"}
+    assert set(body[0]) == {
+        "id", "display_name", "preview_url", "preview_status", "custom"
+    }
 
 
 def test_voice_list_follows_the_configured_provider(client, monkeypatch):
@@ -67,10 +91,9 @@ def test_a_voice_from_the_other_provider_is_rejected(client, monkeypatch):
 
 
 def test_index_page_is_served_at_root(client):
-    # Không bám vào tên thương hiệu (thiết kế đổi được) — bám vào chức năng của trang.
     page = client.get("/").text
-    assert "Lồng tiếng" in page
-    assert 'src="app.js"' in page
+    assert 'id="uploadForm"' in page
+    assert 'src="app.js?v=' in page
 
 
 def test_current_job_is_empty_when_idle(client):
@@ -79,6 +102,36 @@ def test_current_job_is_empty_when_idle(client):
 
 def test_unknown_job_returns_404(client):
     assert client.get("/api/jobs/nope").status_code == 404
+
+
+def test_job_events_terminates_only_after_emitting_a_terminal_snapshot(monkeypatch):
+    from backend.routes import jobs as job_routes
+
+    class RacingJob:
+        status = "running"
+        snapshots = 0
+
+        def snapshot(self):
+            self.snapshots += 1
+            if self.snapshots == 1:
+                self.status = "done"
+                return {"job_id": "race", "status": "running"}
+            return {"job_id": "race", "status": "done"}
+
+    job = RacingJob()
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(job_routes.manager, "get", lambda job_id: job)
+    monkeypatch.setattr(job_routes.asyncio, "sleep", no_sleep)
+
+    async def collect_statuses():
+        response = await job_routes.job_events("race")
+        chunks = [chunk async for chunk in response.body_iterator]
+        return [json.loads(chunk.removeprefix("data: ").strip())["status"] for chunk in chunks]
+
+    assert asyncio.run(collect_statuses()) == ["running", "done"]
 
 
 def test_rejects_unknown_voice(client, monkeypatch, tmp_path):
@@ -126,6 +179,62 @@ def test_a_second_upload_is_accepted_while_a_job_runs(client, monkeypatch, tmp_p
 
     ids = [j["job_id"] for j in client.get("/api/jobs").json()["jobs"]]
     assert "busy" in ids and len(ids) == 2
+
+
+def test_prune_cannot_delete_another_request_workdir_during_upload(
+    client, monkeypatch, tmp_path
+):
+    """A concurrent request must not classify an in-progress upload as stale."""
+    from backend.routes import jobs as job_routes
+    from pipeline.models import MediaInfo
+
+    monkeypatch.setattr(settings, "gemini_api_key", "test-key")
+    monkeypatch.setattr(type(settings), "jobs_dir", property(lambda self: tmp_path))
+    monkeypatch.setattr(
+        job_routes,
+        "probe_video",
+        lambda path: MediaInfo(duration=1.0, video_codec="h264", has_audio=True),
+    )
+    upload_started = threading.Event()
+    allow_upload = threading.Event()
+    response_holder = {}
+
+    async def blocking_upload(_video, destination):
+        destination.write_bytes(b"video")
+        upload_started.set()
+        assert allow_upload.wait(timeout=2)
+
+    def fake_start(**kwargs):
+        assert kwargs["workdir"].is_dir()
+        return Job(
+            id="reserved-upload",
+            filename=kwargs["filename"],
+            workdir=kwargs["workdir"],
+            voice_id=kwargs["voice_id"],
+        )
+
+    monkeypatch.setattr(job_routes, "_save_upload", blocking_upload)
+    monkeypatch.setattr(job_routes.manager, "start", fake_start)
+
+    def upload_job():
+        response_holder["response"] = client.post(
+            "/api/jobs",
+            files={"video": ("pending.mp4", b"data", "video/mp4")},
+            data={"voice_id": VOICES[0].id},
+        )
+
+    worker = threading.Thread(target=upload_job)
+    worker.start()
+    assert upload_started.wait(timeout=2)
+
+    job_routes.manager.prune(tmp_path, keep=0)
+    pending_dirs = [path for path in tmp_path.iterdir() if path.is_dir()]
+
+    allow_upload.set()
+    worker.join(timeout=2)
+    assert worker.is_alive() is False
+    assert len(pending_dirs) == 1
+    assert response_holder["response"].status_code == 200
 
 
 def test_the_job_list_is_newest_first(client, tmp_path):
