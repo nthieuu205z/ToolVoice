@@ -12,6 +12,8 @@ import shutil
 import threading
 from pathlib import Path
 
+import pytest
+
 from backend import job_manager as jm
 from backend.job_manager import Job, JobManager
 from pipeline.errors import JobCancelledError
@@ -187,3 +189,158 @@ def test_prune_cannot_remove_a_concurrently_replaced_registry_entry(tmp_path, mo
 
     assert worker.is_alive() is False
     assert manager.get("same-id") is replacement
+
+
+def test_prune_cannot_delete_workdir_while_start_is_persisting(tmp_path, monkeypatch):
+    """A queued job owns its workdir before its first job.json is published."""
+    manager = JobManager(max_workers=1)
+    workdir = tmp_path / "starting-job"
+    workdir.mkdir()
+    video_path = workdir / "input.mp4"
+    video_path.write_bytes(b"video")
+    persist_started = threading.Event()
+    allow_persist = threading.Event()
+    result: dict[str, Job] = {}
+    real_persist = manager._persist
+
+    def blocking_first_persist(job):
+        persist_started.set()
+        assert allow_persist.wait(timeout=2)
+        real_persist(job)
+
+    monkeypatch.setattr(manager, "_persist", blocking_first_persist)
+    monkeypatch.setattr(manager, "_run", lambda *args, **kwargs: None)
+
+    def start_job():
+        result["job"] = manager.start(
+            filename="input.mp4",
+            workdir=workdir,
+            voice_id="Kore",
+            video_path=video_path,
+            media=MEDIA,
+            backend_factory=lambda: None,
+            options=OPTIONS,
+        )
+
+    worker = threading.Thread(target=start_job)
+    worker.start()
+    assert persist_started.wait(timeout=2)
+
+    manager.prune(tmp_path, keep=0)
+    survived_prune = workdir.is_dir()
+
+    allow_persist.set()
+    worker.join(timeout=2)
+    assert worker.is_alive() is False
+    assert survived_prune is True
+    assert manager.get(result["job"].id) is result["job"]
+    if manager._executor is not None:
+        manager._executor.shutdown(wait=True)
+
+
+def test_nested_workdir_reservations_keep_ownership_until_outer_release(tmp_path):
+    manager = JobManager()
+    workdir = tmp_path / "nested"
+    workdir.mkdir()
+
+    with manager.reserve_workdir(workdir):
+        with manager.reserve_workdir(workdir):
+            manager.prune(tmp_path, keep=0)
+        manager.prune(tmp_path, keep=0)
+        assert workdir.is_dir()
+
+    manager.prune(tmp_path, keep=0)
+    assert workdir.exists() is False
+
+
+def test_only_one_pruner_can_claim_a_workdir(tmp_path, monkeypatch):
+    manager = JobManager()
+    workdir = _write_meta(tmp_path, "stale", "done")
+    first_cleanup_started = threading.Event()
+    release_first_cleanup = threading.Event()
+    second_prune_finished = threading.Event()
+    cleanup_calls = 0
+    cleanup_lock = threading.Lock()
+    real_rmtree = shutil.rmtree
+
+    def blocking_cleanup(path, *args, **kwargs):
+        nonlocal cleanup_calls
+        with cleanup_lock:
+            cleanup_calls += 1
+            call_number = cleanup_calls
+        if call_number == 1:
+            first_cleanup_started.set()
+            assert release_first_cleanup.wait(timeout=2)
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(jm.shutil, "rmtree", blocking_cleanup)
+    first = threading.Thread(target=manager.prune, args=(tmp_path, 0))
+
+    def run_second_prune():
+        manager.prune(tmp_path, keep=0)
+        second_prune_finished.set()
+
+    second = threading.Thread(target=run_second_prune)
+    first.start()
+    assert first_cleanup_started.wait(timeout=2)
+    second.start()
+    second_finished_while_claimed = second_prune_finished.wait(timeout=1)
+
+    release_first_cleanup.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+    assert first.is_alive() is False
+    assert second.is_alive() is False
+    assert second_finished_while_claimed is True
+    assert cleanup_calls == 1
+
+
+def test_prune_ignores_a_directory_that_disappears_during_scan(tmp_path, monkeypatch):
+    manager = JobManager()
+    vanishing = _write_meta(tmp_path, "vanishing", "done")
+    stable = _write_meta(tmp_path, "stable", "done")
+    real_stat = Path.stat
+    vanishing_stat_calls = 0
+
+    def disappearing_stat(path, *args, **kwargs):
+        nonlocal vanishing_stat_calls
+        if path == vanishing:
+            vanishing_stat_calls += 1
+            if vanishing_stat_calls == 1:
+                shutil.rmtree(vanishing)
+                raise FileNotFoundError(vanishing)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", disappearing_stat)
+
+    manager.prune(tmp_path, keep=0)
+
+    assert stable.exists() is False
+
+
+def test_delete_is_retryable_while_prune_owns_the_workdir(tmp_path, monkeypatch):
+    manager = JobManager()
+    workdir = _write_meta(tmp_path, "stale", "done")
+    job = Job(id="stale", filename="a", workdir=workdir, voice_id="v", status="done")
+    manager._jobs[job.id] = job
+    cleanup_started = threading.Event()
+    allow_cleanup = threading.Event()
+    real_rmtree = shutil.rmtree
+
+    def blocking_cleanup(path, *args, **kwargs):
+        cleanup_started.set()
+        assert allow_cleanup.wait(timeout=2)
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(jm.shutil, "rmtree", blocking_cleanup)
+    worker = threading.Thread(target=manager.prune, args=(tmp_path, 0))
+    worker.start()
+    assert cleanup_started.wait(timeout=2)
+
+    try:
+        with pytest.raises(RuntimeError, match="đang được dọn"):
+            manager.delete(job.id)
+    finally:
+        allow_cleanup.set()
+        worker.join(timeout=2)
+    assert worker.is_alive() is False

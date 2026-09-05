@@ -15,10 +15,12 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import stat
 import threading
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -55,6 +57,7 @@ class Job:
     id: str
     filename: str
     workdir: Path
+    workdir_key: Path = field(init=False, repr=False, compare=False)
     voice_id: str
     status: str = "queued"  # queued | running | cancelling | cancelled | done | error
     stage: str = "extract"
@@ -79,6 +82,10 @@ class Job:
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     telemetry_lock: threading.RLock = field(default_factory=threading.RLock,
                                              repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self.workdir = Path(self.workdir)
+        self.workdir_key = self.workdir.resolve(strict=False)
 
     @property
     def cancel_requested(self) -> bool:
@@ -311,8 +318,28 @@ class JobManager:
         self._jobs: dict[str, Job] = {}
         self._futures: dict[str, Future] = {}
         self._deleting: set[str] = set()
+        self._reserved_workdirs: dict[Path, int] = {}
+        self._workdir_deletions: dict[Path, object] = {}
         self._executor: ThreadPoolExecutor | None = None
         self._max_workers = max_workers
+
+    @contextmanager
+    def reserve_workdir(self, workdir: Path):
+        """Own a work directory before it is visible in the job registry."""
+        resolved = workdir.resolve(strict=False)
+        with self._lock:
+            if resolved in self._workdir_deletions:
+                raise RuntimeError(f"Thư mục job đang được dọn: {workdir}")
+            self._reserved_workdirs[resolved] = self._reserved_workdirs.get(resolved, 0) + 1
+        try:
+            yield workdir
+        finally:
+            with self._lock:
+                remaining = self._reserved_workdirs.get(resolved, 0) - 1
+                if remaining > 0:
+                    self._reserved_workdirs[resolved] = remaining
+                else:
+                    self._reserved_workdirs.pop(resolved, None)
 
     # ─── tra cứu ────────────────────────────────────────────────────
 
@@ -345,17 +372,18 @@ class JobManager:
               media: MediaInfo, backend_factory, options: PipelineOptions) -> Job:
         """Nhận job mới. Quá trần chạy đồng thời thì job nằm hàng đợi, không từ chối."""
         job = Job(id=uuid.uuid4().hex[:12], filename=filename, workdir=workdir, voice_id=voice_id)
-        self._persist(job)
-        with self._lock:
-            self._jobs[job.id] = job
-            try:
-                future = self._ensure_executor().submit(
-                    self._run, job, video_path, media, backend_factory, options
-                )
-            except BaseException:
-                self._jobs.pop(job.id, None)
-                raise
-            self._futures[job.id] = future
+        with self.reserve_workdir(workdir):
+            self._persist(job)
+            with self._lock:
+                self._jobs[job.id] = job
+                try:
+                    future = self._ensure_executor().submit(
+                        self._run, job, video_path, media, backend_factory, options
+                    )
+                except BaseException:
+                    self._jobs.pop(job.id, None)
+                    raise
+                self._futures[job.id] = future
         return job
 
     def cancel(self, job_id: str) -> Job:
@@ -390,18 +418,30 @@ class JobManager:
                 raise RuntimeError("Công việc đang chạy, không thể xóa.")
             if job_id in self._deleting:
                 raise RuntimeError("Công việc đang được xóa.")
+            workdir_key = job.workdir_key
+            if (
+                workdir_key in self._reserved_workdirs
+                or workdir_key in self._workdir_deletions
+            ):
+                raise RuntimeError("Thư mục công việc đang được dọn. Hãy thử lại.")
+            deletion_token = object()
+            self._workdir_deletions[workdir_key] = deletion_token
             self._deleting.add(job_id)
         try:
             shutil.rmtree(job.workdir)
         except Exception:
             with self._lock:
                 self._deleting.discard(job_id)
+                if self._workdir_deletions.get(workdir_key) is deletion_token:
+                    self._workdir_deletions.pop(workdir_key, None)
             raise
         with self._lock:
             if self._jobs.get(job_id) is job:
                 self._jobs.pop(job_id, None)
                 self._futures.pop(job_id, None)
             self._deleting.discard(job_id)
+            if self._workdir_deletions.get(workdir_key) is deletion_token:
+                self._workdir_deletions.pop(workdir_key, None)
         return job_id
 
     def _ensure_executor(self) -> ThreadPoolExecutor:
@@ -568,23 +608,37 @@ class JobManager:
         if not jobs_dir.is_dir():
             return
 
-        dirs = sorted(
-            (d for d in jobs_dir.iterdir() if d.is_dir()),
-            key=lambda d: d.stat().st_mtime,
-            reverse=True,
-        )
+        entries: list[tuple[float, Path]] = []
+        for entry in jobs_dir.iterdir():
+            try:
+                info = entry.stat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                log.warning("Không đọc được thư mục job %s: %s", entry, exc)
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                entries.append((info.st_mtime, entry))
+        dirs = [entry for _, entry in sorted(entries, reverse=True)]
         for stale in dirs[keep:]:
             resolved = stale.resolve()
             with self._lock:
+                if (
+                    resolved in self._reserved_workdirs
+                    or resolved in self._workdir_deletions
+                ):
+                    continue
                 registered = list(self._jobs.values())
                 deleting = set(self._deleting)
-            registered_job = next(
-                (job for job in registered if job.workdir.resolve() == resolved), None
-            )
-            if registered_job is not None and (
-                registered_job.status in ACTIVE_STATUSES or registered_job.id in deleting
-            ):
-                continue
+                registered_job = next(
+                    (job for job in registered if job.workdir_key == resolved), None
+                )
+                if registered_job is not None and (
+                    registered_job.status in ACTIVE_STATUSES or registered_job.id in deleting
+                ):
+                    continue
+                deletion_token = object()
+                self._workdir_deletions[resolved] = deletion_token
             try:
                 shutil.rmtree(stale)
             except FileNotFoundError:
@@ -592,6 +646,10 @@ class JobManager:
             except OSError as exc:
                 log.warning("Không dọn được thư mục job %s: %s", stale, exc)
                 continue
+            finally:
+                with self._lock:
+                    if self._workdir_deletions.get(resolved) is deletion_token:
+                        self._workdir_deletions.pop(resolved, None)
             if registered_job is not None:
                 with self._lock:
                     if self._jobs.get(registered_job.id) is registered_job:

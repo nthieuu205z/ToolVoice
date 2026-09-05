@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -178,6 +179,62 @@ def test_a_second_upload_is_accepted_while_a_job_runs(client, monkeypatch, tmp_p
 
     ids = [j["job_id"] for j in client.get("/api/jobs").json()["jobs"]]
     assert "busy" in ids and len(ids) == 2
+
+
+def test_prune_cannot_delete_another_request_workdir_during_upload(
+    client, monkeypatch, tmp_path
+):
+    """A concurrent request must not classify an in-progress upload as stale."""
+    from backend.routes import jobs as job_routes
+    from pipeline.models import MediaInfo
+
+    monkeypatch.setattr(settings, "gemini_api_key", "test-key")
+    monkeypatch.setattr(type(settings), "jobs_dir", property(lambda self: tmp_path))
+    monkeypatch.setattr(
+        job_routes,
+        "probe_video",
+        lambda path: MediaInfo(duration=1.0, video_codec="h264", has_audio=True),
+    )
+    upload_started = threading.Event()
+    allow_upload = threading.Event()
+    response_holder = {}
+
+    async def blocking_upload(_video, destination):
+        destination.write_bytes(b"video")
+        upload_started.set()
+        assert allow_upload.wait(timeout=2)
+
+    def fake_start(**kwargs):
+        assert kwargs["workdir"].is_dir()
+        return Job(
+            id="reserved-upload",
+            filename=kwargs["filename"],
+            workdir=kwargs["workdir"],
+            voice_id=kwargs["voice_id"],
+        )
+
+    monkeypatch.setattr(job_routes, "_save_upload", blocking_upload)
+    monkeypatch.setattr(job_routes.manager, "start", fake_start)
+
+    def upload_job():
+        response_holder["response"] = client.post(
+            "/api/jobs",
+            files={"video": ("pending.mp4", b"data", "video/mp4")},
+            data={"voice_id": VOICES[0].id},
+        )
+
+    worker = threading.Thread(target=upload_job)
+    worker.start()
+    assert upload_started.wait(timeout=2)
+
+    job_routes.manager.prune(tmp_path, keep=0)
+    pending_dirs = [path for path in tmp_path.iterdir() if path.is_dir()]
+
+    allow_upload.set()
+    worker.join(timeout=2)
+    assert worker.is_alive() is False
+    assert len(pending_dirs) == 1
+    assert response_holder["response"].status_code == 200
 
 
 def test_the_job_list_is_newest_first(client, tmp_path):

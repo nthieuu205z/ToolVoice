@@ -47,45 +47,46 @@ async def create_job(video: UploadFile = File(...), voice_id: str = Form(...)) -
     # Định tuyến một lần theo giọng: giọng nhân bản → engine clone; còn lại → tts_provider.
     effective_tts = route_provider(voice_id, settings.tts_provider, clone_provider)
 
-    manager.prune(settings.jobs_dir, keep=_KEEP_JOB_DIRS)
     workdir = settings.jobs_dir / uuid.uuid4().hex[:12]
-    workdir.mkdir(parents=True)
+    with manager.reserve_workdir(workdir):
+        manager.prune(settings.jobs_dir, keep=_KEEP_JOB_DIRS)
+        workdir.mkdir(parents=True)
 
-    video_path = workdir / f"input{Path(video.filename or 'video.mp4').suffix or '.mp4'}"
-    await _save_upload(video, video_path)
+        video_path = workdir / f"input{Path(video.filename or 'video.mp4').suffix or '.mp4'}"
+        await _save_upload(video, video_path)
 
-    # ffprobe trước khi tiêu tốn bất kỳ token Gemini nào.
-    try:
-        media = probe_video(video_path)
-    except UnsupportedMediaError as exc:
-        shutil.rmtree(workdir, ignore_errors=True)
-        raise HTTPException(400, exc.user_message) from exc
+        # ffprobe trước khi tiêu tốn bất kỳ token Gemini nào.
+        try:
+            media = probe_video(video_path)
+        except UnsupportedMediaError as exc:
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise HTTPException(400, exc.user_message) from exc
 
-    options = PipelineOptions(
-        voice_id=voice_id,
-        max_utterance_seconds=settings.max_utterance_seconds,
-        max_utterance_gap=settings.max_utterance_gap,
-        sentence_level_timing=settings.sentence_level_timing,
-        stt_workers=settings.stt_workers,
-        tts_workers=settings.tts_workers,
-        translate_workers=settings.translate_workers,
-        tts_max_speedup=settings.tts_max_speedup,
-        tts_fill_slowdown=settings.tts_fill_slowdown,
-        tts_daily_budget=settings.tts_daily_budget,
-        tts_is_metered=effective_tts == "gemini",
-        # OmniVoice tự vá lỗ hổng im lặng (postprocess) nên KHÔNG chạy bước đọc-lại tốn kém
-        # (mỗi lần là một single-synth ~5,8s, không gộp lô). VieNeu/edge vẫn cần.
-        resynthesize_holes=effective_tts != "omnivoice",
-    )
-    job = manager.start(
-        filename=video.filename or video_path.name,
-        workdir=workdir,
-        voice_id=voice_id,
-        video_path=video_path,
-        media=media,
-        backend_factory=lambda: _make_backend(effective_tts),
-        options=options,
-    )
+        options = PipelineOptions(
+            voice_id=voice_id,
+            max_utterance_seconds=settings.max_utterance_seconds,
+            max_utterance_gap=settings.max_utterance_gap,
+            sentence_level_timing=settings.sentence_level_timing,
+            stt_workers=settings.stt_workers,
+            tts_workers=settings.tts_workers,
+            translate_workers=settings.translate_workers,
+            tts_max_speedup=settings.tts_max_speedup,
+            tts_fill_slowdown=settings.tts_fill_slowdown,
+            tts_daily_budget=settings.tts_daily_budget,
+            tts_is_metered=effective_tts == "gemini",
+            # OmniVoice tự vá lỗ hổng im lặng (postprocess) nên KHÔNG chạy bước đọc-lại tốn kém
+            # (mỗi lần là một single-synth ~5,8s, không gộp lô). VieNeu/edge vẫn cần.
+            resynthesize_holes=effective_tts != "omnivoice",
+        )
+        job = manager.start(
+            filename=video.filename or video_path.name,
+            workdir=workdir,
+            voice_id=voice_id,
+            video_path=video_path,
+            media=media,
+            backend_factory=lambda: _make_backend(effective_tts),
+            options=options,
+        )
     return {"job_id": job.id}
 
 
