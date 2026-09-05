@@ -9,10 +9,11 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 from backend.config import settings
 from backend.job_manager import Job, manager
+from backend.secure_files import HeldFileResponse, OpenedOwnedFile, open_owned_file
 from pipeline.backends import CompositeBackend, build_backend
 from pipeline.errors import UnsupportedMediaError
 from pipeline.probe import probe_video
@@ -184,36 +185,26 @@ async def job_events(job_id: str) -> StreamingResponse:
 
 
 @router.get("/api/jobs/{job_id}/download/video")
-def download_video(job_id: str) -> FileResponse:
+def download_video(job_id: str) -> HeldFileResponse:
     job = _require_done(job_id)
-    path = _job_file(job, job.video_path)
+    opened = _job_file(job, job.video_path)
     stem = Path(job.filename).stem
-    return _serve(path, f"{stem}_vi{path.suffix}")
+    return _serve(opened, f"{stem}_vi{opened.path.suffix}")
 
 
 @router.get("/api/jobs/{job_id}/download/srt")
-def download_srt(job_id: str) -> FileResponse:
+def download_srt(job_id: str) -> HeldFileResponse:
     job = _require_done(job_id)
     return _serve(_job_file(job, job.srt_path), f"{Path(job.filename).stem}_vi.srt")
 
 
-def _job_file(job: Job, value: str) -> Path:
-    """Chỉ phục vụ file kết quả trực tiếp trong thư mục của chính job."""
-    try:
-        raw = Path(value)
-        root = job.workdir.resolve(strict=True)
-        path = raw.resolve(strict=True)
-    except (OSError, RuntimeError, ValueError):
-        raise HTTPException(404, "Không tìm thấy file kết quả.") from None
-    if raw.is_symlink() or (path != root and root not in path.parents) or path.parent != root:
-        raise HTTPException(404, "Không tìm thấy file kết quả.")
-    return path
+def _job_file(job: Job, value: str) -> OpenedOwnedFile:
+    """Mở và giữ file kết quả trực tiếp trong thư mục của chính job."""
+    return open_owned_file(job.workdir, value, "Không tìm thấy file kết quả.")
 
 
-def _serve(path: Path, download_name: str) -> FileResponse:
-    if not path.is_file():
-        raise HTTPException(404, "Không tìm thấy file kết quả.")
-    return FileResponse(path, filename=download_name)
+def _serve(opened: OpenedOwnedFile, download_name: str) -> HeldFileResponse:
+    return HeldFileResponse(opened, filename=download_name)
 
 
 def _require(job_id: str) -> Job:

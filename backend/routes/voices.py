@@ -8,9 +8,9 @@ from pathlib import Path
 
 import numpy as np
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
 
 from backend.config import settings
+from backend.secure_files import HeldFileResponse, owned_file_response
 from pipeline import custom_voices
 from pipeline.audio import decode_to_pcm, write_wav
 from pipeline.errors import FFmpegError
@@ -32,8 +32,9 @@ def _preview_path(voice_id: str) -> Path:
         raise HTTPException(404, "Không tìm thấy giọng đọc này.")
 
     try:
-        root = settings.previews_dir.resolve()
-        path = (root / f"{voice_id}.wav").resolve()
+        # Keep this lexical: the held-open layer must see and reject any symlink/reparse point.
+        root = settings.previews_dir.absolute()
+        path = root / f"{voice_id}.wav"
     except (OSError, RuntimeError, ValueError):
         raise HTTPException(404, "Không tìm thấy giọng đọc này.") from None
     if path.parent != root:
@@ -77,11 +78,15 @@ def list_voices() -> list[dict]:
 
 
 @router.get("/api/voices/{voice_id}/preview")
-def preview_voice(voice_id: str) -> FileResponse:
+def preview_voice(voice_id: str) -> HeldFileResponse:
     path = _preview_path(voice_id)
-    if not path.is_file():
-        raise HTTPException(404, "Giọng này chưa có file demo.")
-    return FileResponse(path, media_type="audio/wav", filename=f"{voice_id}.wav")
+    return owned_file_response(
+        settings.previews_dir,
+        path,
+        media_type="audio/wav",
+        filename=f"{voice_id}.wav",
+        not_found_detail="Giọng này chưa có file demo.",
+    )
 
 
 @router.get("/api/voices/cloning")

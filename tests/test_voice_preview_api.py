@@ -1,3 +1,6 @@
+import asyncio
+import os
+
 import numpy as np
 import pytest
 from fastapi import HTTPException
@@ -8,6 +11,33 @@ from backend.main import app
 from backend.routes import voices as voice_routes
 from pipeline import custom_voices
 from pipeline.audio import write_wav
+
+
+async def _response_body(response) -> bytes:
+    messages = []
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/preview",
+        "raw_path": b"/preview",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [],
+        "client": ("test", 1),
+        "server": ("test", 80),
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        messages.append(message)
+
+    await response(scope, receive, send)
+    return b"".join(message.get("body", b"") for message in messages)
 
 
 @pytest.fixture
@@ -26,6 +56,45 @@ def test_voice_preview_endpoint_serves_a_known_preview(client, tmp_path, monkeyp
     assert response.status_code == 200
     assert response.content == b"RIFFfake"
     assert response.headers["content-type"] == "audio/wav"
+    assert response.headers["content-disposition"] == (
+        'attachment; filename="vi-VN-HoaiMyNeural.wav"'
+    )
+
+
+def test_voice_preview_holds_the_validated_file_when_the_path_is_replaced(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "tts_provider", "edge")
+    monkeypatch.setattr(type(settings), "previews_dir", property(lambda self: tmp_path))
+    preview = tmp_path / "vi-VN-HoaiMyNeural.wav"
+    preview.write_bytes(b"RIFFsafe")
+    replacement = tmp_path / "outside.wav"
+    replacement.write_bytes(b"RIFFoutside")
+
+    response = voice_routes.preview_voice("vi-VN-HoaiMyNeural")
+    try:
+        os.replace(replacement, preview)
+    except PermissionError:
+        # Windows holds the validated file without delete sharing, so replacement is denied.
+        pass
+
+    assert asyncio.run(_response_body(response)) == b"RIFFsafe"
+    assert response.file.closed is True
+
+
+def test_voice_preview_rejects_a_symlink_to_another_managed_file(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "tts_provider", "edge")
+    monkeypatch.setattr(type(settings), "previews_dir", property(lambda self: tmp_path))
+    target = tmp_path / "other.wav"
+    target.write_bytes(b"RIFFother voice")
+    preview = tmp_path / "vi-VN-HoaiMyNeural.wav"
+    try:
+        preview.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"Symlinks unavailable on this platform: {exc}")
+
+    response = client.get("/api/voices/vi-VN-HoaiMyNeural/preview")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Giọng này chưa có file demo."
 
 
 def test_voice_preview_endpoint_serves_a_registered_custom_preview(
