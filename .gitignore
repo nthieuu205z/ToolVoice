@@ -23,6 +23,9 @@ custom_voices/
 # Kết quả tool phân tích code (không thuộc ứng dụng).
 graphify-out/
 
+# Workspace cô lập cho các nhánh Codex; không thuộc mã nguồn ứng dụng.
+.worktrees/
+
 # File audio đo/smoke ở gốc repo (sản phẩm của spike, không phải nguồn).
 /*.wav
 
