@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=20260905-37">
+  <link rel="stylesheet" href="style.css?v=20260905-38">
 </head>
 <body>
   <a class="skip-link" href="#main-content">Bỏ qua điều hướng</a>
@@ -91,7 +91,7 @@
               <div class="graph-step" role="listitem"><div class="graph-node" data-stage="extract"><span class="node-index">01</span><span class="node-icon icon-upload" aria-hidden="true"></span><strong>Upload</strong><small>Input video</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="0"><span class="graph-flow"></span></span></div></div>
               <div class="graph-step" role="listitem"><div class="graph-node" data-stage="transcribe"><span class="node-index">02</span><span class="node-icon icon-wave" aria-hidden="true"></span><strong>Whisper STT</strong><small>Nhận diện</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="1"><span class="graph-flow"></span></span></div></div>
               <div class="graph-step" role="listitem"><div class="graph-node" data-stage="translate"><span class="node-index">03</span><span class="node-icon icon-language" aria-hidden="true"></span><strong>Gemini</strong><small>Dịch thuật</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="2"><span class="graph-flow"></span></span></div></div>
-              <div class="graph-step" role="listitem"><div class="graph-node" data-stage="synthesize"><span class="node-index">04</span><span class="node-icon icon-sound" aria-hidden="true"></span><strong>OmniVoice</strong><small id="graphTtsNote">MPS · batch</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="3"><span class="graph-flow"></span></span></div></div>
+              <div class="graph-step" role="listitem"><div class="graph-node" data-stage="synthesize"><span class="node-index">04</span><span class="node-icon icon-sound" aria-hidden="true"></span><strong>TTS Engine</strong><small id="graphTtsNote">Theo cấu hình job</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="3"><span class="graph-flow"></span></span></div></div>
               <div class="graph-step" role="listitem"><div class="graph-node" data-stage="subtitle"><span class="node-index">05</span><span class="node-icon icon-caption" aria-hidden="true"></span><strong>Subtitle</strong><small>Phụ đề .srt</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="4"><span class="graph-flow"></span></span></div></div>
               <div class="graph-step" role="listitem"><div class="graph-node" data-stage="assemble"><span class="node-index">06</span><span class="node-icon icon-layers" aria-hidden="true"></span><strong>Assemble</strong><small>Ghép audio</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="5"><span class="graph-flow"></span></span></div></div>
               <div class="graph-step" role="listitem"><div class="graph-node" data-stage="mux"><span class="node-index">07</span><span class="node-icon icon-export" aria-hidden="true"></span><strong>Export</strong><small>Video hoàn tất</small></div></div>
@@ -108,8 +108,8 @@
       </section>
 
       <section class="panel voice-panel" id="voiceSettings" aria-labelledby="voice-title">
-        <div class="panel-heading compact"><div><p class="eyebrow">VOICE LAB</p><h2 id="voice-title">Giọng đọc</h2></div><span class="upload-step">OMNIVOICE</span></div>
-        <div class="voice-toolbar"><div><strong>Giọng nhân bản</strong><p>Tạo một giọng mới từ audio mẫu. Engine clone chạy local trên OmniVoice.</p></div><div class="voice-toolbar-actions"><span class="voice-count" id="voiceCount">0 giọng</span><button class="button small" id="toggleVoiceForm" type="button" aria-expanded="false">+ Tạo giọng</button></div></div>
+        <div class="panel-heading compact"><div><p class="eyebrow">VOICE LAB</p><h2 id="voice-title">Giọng đọc</h2></div><span class="upload-step">LOCAL VOICE</span></div>
+        <div class="voice-toolbar"><div><strong>Giọng nhân bản</strong><p>Tạo một giọng mới từ audio mẫu. Engine nhân bản chạy local theo cấu hình hiện tại.</p></div><div class="voice-toolbar-actions"><span class="voice-count" id="voiceCount">0 giọng</span><button class="button small" id="toggleVoiceForm" type="button" aria-expanded="false">+ Tạo giọng</button></div></div>
         <div class="voice-list" id="voiceList"><div class="event-empty">Đang tải danh sách giọng…</div></div>
         <form class="voice-form" id="voiceForm" hidden>
           <div class="voice-form-grid"><label class="field-wrap"><span class="field-label">Tên giọng</span><input id="cloneName" name="name" type="text" maxlength="40" placeholder="Ví dụ: Giọng của tôi" required></label><label class="field-wrap"><span class="field-label">Audio mẫu</span><input id="cloneAudio" name="audio" type="file" accept="audio/*" required></label><button class="button primary" id="createVoiceButton" type="submit">Tạo giọng</button></div>
@@ -124,11 +124,11 @@
 
       <section class="panel settings-panel" id="settings" aria-labelledby="settings-title"><div class="panel-heading compact"><div><p class="eyebrow">RUNTIME SETTINGS</p><h2 id="settings-title">Cấu hình Gemini</h2></div><span class="settings-status" id="geminiSettingsStatus">Chưa cấu hình</span></div><form id="geminiSettingsForm" class="settings-form" novalidate><label class="field-wrap"><span class="field-label">Gemini API key</span><input id="geminiApiKey" name="api_key" type="password" autocomplete="new-password" placeholder="Dán key Gemini tại đây" required></label><label class="field-wrap"><span class="field-label">Endpoint</span><select id="geminiBackend" name="backend"><option value="developer">Developer API / AI Studio</option><option value="vertex">Vertex AI Express Mode</option></select></label><button class="button primary" type="submit">Lưu cấu hình</button></form><p class="form-hint" id="geminiSettingsHint">Key được lưu vào .env local. Giao diện không hiển thị lại key sau khi lưu.</p></section>
 
-      <footer class="footer"><span>SUB. OPS CONSOLE</span><span>Local-first video dubbing · OmniVoice / Whisper / Gemini</span><span class="mono">v2.0.0</span></footer>
+      <footer class="footer"><span>SUB. OPS CONSOLE</span><span>Local-first video dubbing · TTS / STT / Translation</span><span class="mono">v2.0.0</span></footer>
     </main>
   </div>
   <div class="toast-stack" id="toastStack" aria-live="polite"></div>
   <div class="sr-status" id="srStatus" role="status" aria-live="polite" aria-atomic="true"></div>
-  <script src="app.js?v=20260905-37"></script>
+  <script src="app.js?v=20260905-38"></script>
 </body>
 </html>

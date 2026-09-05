@@ -172,7 +172,6 @@ h2 { margin-bottom: 0; font-size: 16px; font-weight: 700; letter-spacing: -.025e
 .job-progress-row { display: flex; justify-content: space-between; gap: 10px; margin-top: 14px; color: var(--text-dim); font-size: 11px; }
 .job-progress-row strong { color: var(--blue-bright); font: 12px var(--mono); }
 .progress-track { position: relative; height: 5px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.075); }
-.progress-track.large { height: 8px; }
 .progress-track > span { display: block; width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #2676d2, var(--blue-bright)); box-shadow: 0 0 15px rgba(85,167,255,.55); transition: width .55s var(--ease); }
 .progress-track > span::after { content: ""; position: absolute; inset: 0; width: 35%; background: linear-gradient(90deg, transparent, rgba(255,255,255,.35), transparent); animation: sweep 1.7s linear infinite; }
 @keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(310%); } }

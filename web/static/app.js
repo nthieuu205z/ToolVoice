@@ -8,7 +8,7 @@ const STAGE_META = {
   extract: { label: "Tách âm thanh", detail: "Chuẩn bị audio từ video" },
   transcribe: { label: "Nhận diện giọng nói", detail: "Whisper tạo transcript" },
   translate: { label: "Dịch thuật", detail: "Gemini chuyển ngữ tiếng Việt" },
-  synthesize: { label: "Tạo giọng đọc", detail: "OmniVoice dựng batch audio" },
+  synthesize: { label: "Tạo giọng đọc", detail: "Engine giọng đọc xử lý audio" },
   subtitle: { label: "Tạo phụ đề", detail: "Căn cue theo giọng đọc" },
   assemble: { label: "Ghép âm thanh", detail: "Đặt các segment vào timeline" },
   mux: { label: "Xuất video", detail: "Đóng gói video hoàn tất" },
@@ -76,11 +76,11 @@ function togglePreview(voice, button) {
 async function deleteVoice(voice) { if (!window.confirm(`Xóa giọng “${voice.display_name}”?`)) return; try { await apiJson(`/api/voices/custom/${encodeURIComponent(voice.id)}`, { method: "DELETE" }); if ($("#voiceSelect").value === voice.id) $("#voiceSelect").value = ""; await loadVoices(); toast("Đã xóa giọng nhân bản.", "success"); } catch (error) { toast(error.message, "error"); } }
 function setupVoiceLab() {
   const toggle = $("#toggleVoiceForm"); const form = $("#voiceForm"); toggle.addEventListener("click", () => { form.hidden = !form.hidden; toggle.setAttribute("aria-expanded", String(!form.hidden)); });
-  form.addEventListener("submit", async event => { event.preventDefault(); if (state.cloneBusy) return; const name = $("#cloneName").value.trim(); const audio = $("#cloneAudio").files[0]; const hint = $("#voiceFormHint"); if (!name || !audio) { hint.textContent = "Nhập tên và chọn audio mẫu trước khi tạo."; return; } state.cloneBusy = true; $("#createVoiceButton").disabled = true; $("#createVoiceButton").textContent = "Đang tạo…"; hint.textContent = "Đang chuẩn hóa audio và đăng ký giọng local…"; try { const data = new FormData(); data.append("name", name); data.append("audio", audio); const voice = await apiJson("/api/voices/custom", { method: "POST", body: data }); await loadVoices(); $("#voiceSelect").value = voice.id; $("#voiceSelect").dispatchEvent(new Event("change")); form.reset(); form.hidden = true; toggle.setAttribute("aria-expanded", "false"); hint.textContent = "Nên dùng audio 3–8 giây, một người nói, ít tạp âm."; toast("Đã tạo giọng nhân bản OmniVoice.", "success"); } catch (error) { hint.textContent = error.message; toast(error.message, "error"); } finally { state.cloneBusy = false; $("#createVoiceButton").disabled = false; $("#createVoiceButton").textContent = "Tạo giọng"; } });
+  form.addEventListener("submit", async event => { event.preventDefault(); if (state.cloneBusy) return; const name = $("#cloneName").value.trim(); const audio = $("#cloneAudio").files[0]; const hint = $("#voiceFormHint"); if (!name || !audio) { hint.textContent = "Nhập tên và chọn audio mẫu trước khi tạo."; return; } state.cloneBusy = true; $("#createVoiceButton").disabled = true; $("#createVoiceButton").textContent = "Đang tạo…"; hint.textContent = "Đang chuẩn hóa audio và đăng ký giọng local…"; try { const data = new FormData(); data.append("name", name); data.append("audio", audio); const voice = await apiJson("/api/voices/custom", { method: "POST", body: data }); await loadVoices(); $("#voiceSelect").value = voice.id; $("#voiceSelect").dispatchEvent(new Event("change")); form.reset(); form.hidden = true; toggle.setAttribute("aria-expanded", "false"); hint.textContent = "Nên dùng audio 3–8 giây, một người nói, ít tạp âm."; toast("Đã tạo giọng nhân bản.", "success"); } catch (error) { hint.textContent = error.message; toast(error.message, "error"); } finally { state.cloneBusy = false; $("#createVoiceButton").disabled = false; $("#createVoiceButton").textContent = "Tạo giọng"; } });
 }
 
 async function loadSystemHealth() { const stack = $("#healthStack"); stack.textContent = ""; try { const data = await apiJson("/api/model"); const models = Array.isArray(data.models) ? data.models : []; const rows = models.map(model => ({ label: model.key === "omnivoice" ? "OmniVoice" : model.key === "whisper" ? "Whisper STT" : model.label, status: model.ready ? "Sẵn sàng" : model.status === "downloading" ? "Đang tải" : "Chưa sẵn sàng", tone: model.ready ? "live" : model.status === "error" ? "error" : "warn" })); rows.push({ label: "API server", status: "Online", tone: "live" }); rows.forEach(row => { const item = document.createElement("div"); item.className = "health-row"; item.innerHTML = `<span class="status-dot ${row.tone}"></span><span></span><em></em>`; item.children[1].textContent = row.label; item.children[2].textContent = row.status; stack.append(item); }); } catch (_) { stack.innerHTML = '<div class="health-row"><span class="status-dot error"></span><span>API server</span><em>Offline</em></div>'; } }
-function updateMetrics() { const running = state.jobs.filter(job => job.status === "running" || job.status === "cancelling"); const queued = state.jobs.filter(job => job.status === "queued"); const done = state.jobs.filter(job => job.status === "done"); const focus = running[0] || state.jobs.find(job => job.job_id === state.selectedJobId) || null; $("#metricRunning").textContent = running.length; $("#metricQueued").textContent = queued.length; $("#metricDone").textContent = done.length; $("#navActiveCount").textContent = running.length; $("#navJobCount").textContent = state.jobs.length; $("#metricRunningNote").textContent = running.length ? `${stageLabel(focus.stage)} · ${Math.round(focus.percent || 0)}%` : "Không có job hoạt động"; $("#metricDevice").textContent = focus?.device || "—"; $("#metricEngine").textContent = focus?.engine ? `${focus.engine} · batch ${focus.batch_size || 0}` : "Chưa có engine đang chạy"; $("#lastUpdated").textContent = `Cập nhật ${new Date().toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`; }
+function updateMetrics() { const running = state.jobs.filter(job => job.status === "running" || job.status === "cancelling"); const queued = state.jobs.filter(job => job.status === "queued"); const done = state.jobs.filter(job => job.status === "done"); const focus = running[0] || state.jobs.find(job => job.job_id === state.selectedJobId) || null; const runtimeEngine = focus?.engine || "Chưa có engine đang chạy"; const runtimeDevice = focus?.device || "—"; $("#metricRunning").textContent = running.length; $("#metricQueued").textContent = queued.length; $("#metricDone").textContent = done.length; $("#navActiveCount").textContent = running.length; $("#navJobCount").textContent = state.jobs.length; $("#metricRunningNote").textContent = running.length ? `${stageLabel(focus.stage)} · ${Math.round(focus.percent || 0)}%` : "Không có job hoạt động"; $("#metricDevice").textContent = runtimeDevice; $("#metricEngine").textContent = focus?.batch_size ? `${runtimeEngine} · batch ${focus.batch_size}` : runtimeEngine; $("#lastUpdated").textContent = `Cập nhật ${new Date().toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`; }
 function jobCardMarkup(job) {
   const statusMeta = STATUS_META[job.status] || STATUS_META.queued;
   const percent = Math.round(job.percent || 0);
@@ -235,13 +235,17 @@ function renderGraph(job) {
     title.textContent = "Chưa có job đang chạy";
     text.textContent = "Sơ đồ sẽ phát sáng theo từng bước khi pipeline hoạt động.";
     timer.textContent = "—";
+    $("#graphTtsNote").textContent = "Theo cấu hình job";
     updateGraphFlow(null);
     return;
   }
   title.textContent = `${stageLabel(job.stage)} · ${Math.round(job.percent || 0)}%`;
   text.textContent = job.message || STAGE_META[job.stage]?.detail || "Đang xử lý";
   timer.textContent = fmtDuration(job.stage_elapsed_seconds);
-  $("#graphTtsNote").textContent = job.engine === "omnivoice" ? `${job.device || "local"} · batch ${job.batch_size || 0}` : "local / cloud";
+  const runtimeEngine = job.engine || "TTS";
+  const runtimeDevice = job.device || "—";
+  const runtimeBatch = job.batch_size ? ` · batch ${job.batch_size}` : "";
+  $("#graphTtsNote").textContent = `${runtimeEngine} · ${runtimeDevice}${runtimeBatch}`;
   updateGraphFlow(job);
 }
 function syncGraphScrollAffordance() {
