@@ -397,14 +397,14 @@ select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(85,167,255,
   .workspace-grid { grid-template-columns: 1fr; }
   .selected-panel { min-height: 0; }
   .selected-empty { min-height: 150px; }
-  .graph-scroll-shell { overflow: hidden; border-radius: 15px; }
+  .graph-scroll-shell { overflow-x: auto; overflow-y: hidden; border-radius: 15px; scrollbar-width: thin; scrollbar-color: rgba(85,167,255,.42) transparent; }
   .graph-scroll-shell::after { opacity: 1; }
   .graph-scroll-shell.is-at-end::after { opacity: 0; }
-  .graph-track { overflow-x: auto; grid-template-columns: repeat(7, minmax(105px, 1fr)); min-width: 820px; scrollbar-width: thin; scrollbar-color: rgba(85,167,255,.42) transparent; }
+  .graph-track { grid-template-columns: repeat(7, minmax(105px, 1fr)); min-width: 820px; }
   .graph-track { --graph-gap: 18px; }
-  .graph-track::-webkit-scrollbar { height: 5px; }
-  .graph-track::-webkit-scrollbar-track { background: transparent; }
-  .graph-track::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(85,167,255,.42); }
+  .graph-scroll-shell::-webkit-scrollbar { height: 5px; }
+  .graph-scroll-shell::-webkit-scrollbar-track { background: transparent; }
+  .graph-scroll-shell::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(85,167,255,.42); }
   .graph-scroll-cue { position: absolute; z-index: 5; right: 13px; bottom: 8px; display: inline-flex; align-items: center; gap: 5px; padding: 4px 7px; border: 1px solid rgba(138,199,255,.22); border-radius: 999px; color: var(--blue-bright); background: rgba(7,11,18,.84); font: 8px var(--mono); opacity: 0; pointer-events: none; transition: opacity .25s ease; }
   .graph-scroll-cue { opacity: .9; }
   .graph-scroll-cue::after { content: "→"; font-size: 11px; line-height: 1; }

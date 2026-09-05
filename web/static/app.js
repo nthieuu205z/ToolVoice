@@ -246,11 +246,10 @@ function renderGraph(job) {
 }
 function syncGraphScrollAffordance() {
   const shell = $(".graph-scroll-shell");
-  const track = $("#pipelineGraph");
-  if (!shell || !track) return;
-  const scrollable = track.scrollWidth > shell.clientWidth + 1;
+  if (!shell) return;
+  const scrollable = shell.scrollWidth > shell.clientWidth + 1;
   shell.classList.toggle("is-scrollable", scrollable);
-  shell.classList.toggle("is-at-end", scrollable && track.scrollLeft + track.clientWidth >= track.scrollWidth - 1);
+  shell.classList.toggle("is-at-end", scrollable && shell.scrollLeft + shell.clientWidth >= shell.scrollWidth - 1);
 }
 function updateGraphFlow(job) {
   const currentIndex = job ? STAGES.indexOf(job.stage) : -1;
@@ -368,4 +367,4 @@ function submitUpload(event) {
 $("#refreshButton").addEventListener("click", () => { loadSystemHealth(); loadVoices(); refreshJobs(); loadGeminiSettings(); });
 $("#clearEvents").addEventListener("click", () => { state.lastEvents = []; renderEvents(null); });
 document.addEventListener("click", event => { const button = event.target.closest("[data-action=\"cancel\"]"); if (button) { event.stopPropagation(); cancelJob(button.dataset.jobId); return; } const remove = event.target.closest("[data-action=\"delete-job\"]"); if (remove) { event.stopPropagation(); const job = state.jobs.find(item => item.job_id === remove.dataset.jobId); if (job) deleteJob(job); } });
-(async function init() { setupUpload(); setupVoiceLab(); setupGeminiSettings(); setupShutdown(); const graphTrack = $("#pipelineGraph"); window.addEventListener("resize", syncGraphScrollAffordance); window.addEventListener("resize", syncJobListViewport); graphTrack?.addEventListener("scroll", syncGraphScrollAffordance, { passive: true }); await Promise.all([loadVoices(), loadSystemHealth(), refreshJobs()]); syncGraphScrollAffordance(); window.setInterval(() => { const job = state.jobs.find(item => item.job_id === state.selectedJobId); if (job && ACTIVE_STATUSES.has(job.status)) { renderSelectedJob(); updateMetrics(); } }, 1000); })();
+(async function init() { setupUpload(); setupVoiceLab(); setupGeminiSettings(); setupShutdown(); const graphScrollShell = $(".graph-scroll-shell"); window.addEventListener("resize", syncGraphScrollAffordance); window.addEventListener("resize", syncJobListViewport); graphScrollShell?.addEventListener("scroll", syncGraphScrollAffordance, { passive: true }); await Promise.all([loadVoices(), loadSystemHealth(), refreshJobs()]); syncGraphScrollAffordance(); window.setInterval(() => { const job = state.jobs.find(item => item.job_id === state.selectedJobId); if (job && ACTIVE_STATUSES.has(job.status)) { renderSelectedJob(); updateMetrics(); } }, 1000); })();
