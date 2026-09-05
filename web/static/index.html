@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=20260905-36">
+  <link rel="stylesheet" href="style.css?v=20260905-37">
 </head>
 <body>
   <a class="skip-link" href="#main-content">Bỏ qua điều hướng</a>
@@ -85,15 +85,17 @@
 
       <section class="panel pipeline-panel" id="architecture" aria-labelledby="pipeline-title">
         <div class="panel-heading"><div><p class="eyebrow">EXECUTION GRAPH</p><h2 id="pipeline-title">Pipeline lõi</h2></div><div class="graph-legend"><span><i class="legend-dot completed"></i>Đã xong</span><span><i class="legend-dot active"></i>Đang chạy</span><span><i class="legend-dot pending"></i>Chờ</span></div></div>
-        <div class="graph-scroll-shell">
-          <div class="graph-track" id="pipelineGraph" role="list" aria-label="Các bước xử lý video">
-            <div class="graph-step" role="listitem"><div class="graph-node" data-stage="extract"><span class="node-index">01</span><span class="node-icon icon-upload" aria-hidden="true"></span><strong>Upload</strong><small>Input video</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="0"><span class="graph-flow"></span></span></div></div>
-            <div class="graph-step" role="listitem"><div class="graph-node" data-stage="transcribe"><span class="node-index">02</span><span class="node-icon icon-wave" aria-hidden="true"></span><strong>Whisper STT</strong><small>Nhận diện</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="1"><span class="graph-flow"></span></span></div></div>
-            <div class="graph-step" role="listitem"><div class="graph-node" data-stage="translate"><span class="node-index">03</span><span class="node-icon icon-language" aria-hidden="true"></span><strong>Gemini</strong><small>Dịch thuật</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="2"><span class="graph-flow"></span></span></div></div>
-            <div class="graph-step" role="listitem"><div class="graph-node" data-stage="synthesize"><span class="node-index">04</span><span class="node-icon icon-sound" aria-hidden="true"></span><strong>OmniVoice</strong><small id="graphTtsNote">MPS · batch</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="3"><span class="graph-flow"></span></span></div></div>
-            <div class="graph-step" role="listitem"><div class="graph-node" data-stage="subtitle"><span class="node-index">05</span><span class="node-icon icon-caption" aria-hidden="true"></span><strong>Subtitle</strong><small>Phụ đề .srt</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="4"><span class="graph-flow"></span></span></div></div>
-            <div class="graph-step" role="listitem"><div class="graph-node" data-stage="assemble"><span class="node-index">06</span><span class="node-icon icon-layers" aria-hidden="true"></span><strong>Assemble</strong><small>Ghép audio</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="5"><span class="graph-flow"></span></span></div></div>
-            <div class="graph-step" role="listitem"><div class="graph-node" data-stage="mux"><span class="node-index">07</span><span class="node-icon icon-export" aria-hidden="true"></span><strong>Export</strong><small>Video hoàn tất</small></div></div>
+        <div class="graph-scroll-frame">
+          <div class="graph-scroll-shell">
+            <div class="graph-track" id="pipelineGraph" role="list" aria-label="Các bước xử lý video">
+              <div class="graph-step" role="listitem"><div class="graph-node" data-stage="extract"><span class="node-index">01</span><span class="node-icon icon-upload" aria-hidden="true"></span><strong>Upload</strong><small>Input video</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="0"><span class="graph-flow"></span></span></div></div>
+              <div class="graph-step" role="listitem"><div class="graph-node" data-stage="transcribe"><span class="node-index">02</span><span class="node-icon icon-wave" aria-hidden="true"></span><strong>Whisper STT</strong><small>Nhận diện</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="1"><span class="graph-flow"></span></span></div></div>
+              <div class="graph-step" role="listitem"><div class="graph-node" data-stage="translate"><span class="node-index">03</span><span class="node-icon icon-language" aria-hidden="true"></span><strong>Gemini</strong><small>Dịch thuật</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="2"><span class="graph-flow"></span></span></div></div>
+              <div class="graph-step" role="listitem"><div class="graph-node" data-stage="synthesize"><span class="node-index">04</span><span class="node-icon icon-sound" aria-hidden="true"></span><strong>OmniVoice</strong><small id="graphTtsNote">MPS · batch</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="3"><span class="graph-flow"></span></span></div></div>
+              <div class="graph-step" role="listitem"><div class="graph-node" data-stage="subtitle"><span class="node-index">05</span><span class="node-icon icon-caption" aria-hidden="true"></span><strong>Subtitle</strong><small>Phụ đề .srt</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="4"><span class="graph-flow"></span></span></div></div>
+              <div class="graph-step" role="listitem"><div class="graph-node" data-stage="assemble"><span class="node-index">06</span><span class="node-icon icon-layers" aria-hidden="true"></span><strong>Assemble</strong><small>Ghép audio</small></div><div class="graph-rail" aria-hidden="true"><span class="graph-link" data-flow-index="5"><span class="graph-flow"></span></span></div></div>
+              <div class="graph-step" role="listitem"><div class="graph-node" data-stage="mux"><span class="node-index">07</span><span class="node-icon icon-export" aria-hidden="true"></span><strong>Export</strong><small>Video hoàn tất</small></div></div>
+            </div>
           </div>
           <span class="graph-scroll-cue" aria-hidden="true">Kéo ngang để xem toàn bộ pipeline</span>
         </div>
@@ -127,6 +129,6 @@
   </div>
   <div class="toast-stack" id="toastStack" aria-live="polite"></div>
   <div class="sr-status" id="srStatus" role="status" aria-live="polite" aria-atomic="true"></div>
-  <script src="app.js?v=20260905-36"></script>
+  <script src="app.js?v=20260905-37"></script>
 </body>
 </html>

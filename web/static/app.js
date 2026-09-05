@@ -247,9 +247,11 @@ function renderGraph(job) {
 function syncGraphScrollAffordance() {
   const shell = $(".graph-scroll-shell");
   if (!shell) return;
+  const frame = shell.closest(".graph-scroll-frame");
+  if (!frame) return;
   const scrollable = shell.scrollWidth > shell.clientWidth + 1;
-  shell.classList.toggle("is-scrollable", scrollable);
-  shell.classList.toggle("is-at-end", scrollable && shell.scrollLeft + shell.clientWidth >= shell.scrollWidth - 1);
+  frame.classList.toggle("is-scrollable", scrollable);
+  frame.classList.toggle("is-at-end", scrollable && shell.scrollLeft + shell.clientWidth >= shell.scrollWidth - 1);
 }
 function updateGraphFlow(job) {
   const currentIndex = job ? STAGES.indexOf(job.stage) : -1;
