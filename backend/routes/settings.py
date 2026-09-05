@@ -7,13 +7,14 @@ import os
 import tempfile
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from backend.config import ROOT, settings
 
 router = APIRouter()
 ENV_PATH = ROOT / ".env"
 _ALLOWED_BACKENDS = {"developer", "vertex"}
+_MAX_API_KEY_LENGTH = 512
 
 
 def _dotenv_quote(value: str) -> str:
@@ -22,8 +23,8 @@ def _dotenv_quote(value: str) -> str:
 
 
 class GeminiSettingsPayload(BaseModel):
-    api_key: str = Field(default="", max_length=512)
-    backend: str = Field(default="developer", max_length=32)
+    api_key: str = ""
+    backend: str = "developer"
 
 
 def _masked_status() -> dict:
@@ -41,6 +42,8 @@ def update_gemini_settings(payload: GeminiSettingsPayload) -> dict:
     backend = payload.backend.strip().lower()
     if backend not in _ALLOWED_BACKENDS:
         raise HTTPException(400, "Gemini backend phải là developer hoặc vertex.")
+    if len(payload.api_key) > _MAX_API_KEY_LENGTH:
+        raise HTTPException(400, "Gemini API key không được dài quá 512 ký tự.")
     if any(char in payload.api_key for char in "\r\n"):
         raise HTTPException(400, "Gemini API key không được chứa ký tự xuống dòng.")
     api_key = payload.api_key.strip()
