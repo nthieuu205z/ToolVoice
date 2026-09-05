@@ -307,26 +307,32 @@ class JobManager:
     """Sổ đăng ký job + pool luồng. Route chỉ đọc snapshot, không đụng thread."""
 
     def __init__(self, max_workers: int | None = None):
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._jobs: dict[str, Job] = {}
         self._futures: dict[str, Future] = {}
+        self._deleting: set[str] = set()
         self._executor: ThreadPoolExecutor | None = None
         self._max_workers = max_workers
 
     # ─── tra cứu ────────────────────────────────────────────────────
 
     def get(self, job_id: str) -> Job | None:
-        return self._jobs.get(job_id)
+        with self._lock:
+            return self._jobs.get(job_id)
 
     def jobs(self) -> list[dict]:
         """Snapshot mọi job, mới nhất trước — giao diện vẽ thẳng danh sách này."""
-        ordered = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
+        with self._lock:
+            registered = list(self._jobs.values())
+        ordered = sorted(registered, key=lambda j: j.created_at, reverse=True)
         return [job.snapshot() for job in ordered]
 
     @property
     def current(self) -> Job | None:
         """Job đang sống mới nhất — giữ cho /api/jobs/current cũ tiếp tục chạy."""
-        active = [j for j in self._jobs.values() if j.status in ACTIVE_STATUSES]
+        with self._lock:
+            registered = list(self._jobs.values())
+        active = [j for j in registered if j.status in ACTIVE_STATUSES]
         return max(active, key=lambda j: j.created_at) if active else None
 
     def is_busy(self) -> bool:
@@ -339,14 +345,17 @@ class JobManager:
               media: MediaInfo, backend_factory, options: PipelineOptions) -> Job:
         """Nhận job mới. Quá trần chạy đồng thời thì job nằm hàng đợi, không từ chối."""
         job = Job(id=uuid.uuid4().hex[:12], filename=filename, workdir=workdir, voice_id=voice_id)
+        self._persist(job)
         with self._lock:
             self._jobs[job.id] = job
-        self._persist(job)
-
-        future = self._ensure_executor().submit(
-            self._run, job, video_path, media, backend_factory, options
-        )
-        self._futures[job.id] = future
+            try:
+                future = self._ensure_executor().submit(
+                    self._run, job, video_path, media, backend_factory, options
+                )
+            except BaseException:
+                self._jobs.pop(job.id, None)
+                raise
+            self._futures[job.id] = future
         return job
 
     def cancel(self, job_id: str) -> Job:
@@ -379,29 +388,34 @@ class JobManager:
                 raise LookupError(job_id)
             if job.status in ACTIVE_STATUSES:
                 raise RuntimeError("Công việc đang chạy, không thể xóa.")
-            self._jobs.pop(job_id, None)
-            future = self._futures.pop(job_id, None)
+            if job_id in self._deleting:
+                raise RuntimeError("Công việc đang được xóa.")
+            self._deleting.add(job_id)
         try:
             shutil.rmtree(job.workdir)
         except Exception:
             with self._lock:
-                self._jobs[job_id] = job
-                if future is not None:
-                    self._futures[job_id] = future
+                self._deleting.discard(job_id)
             raise
+        with self._lock:
+            if self._jobs.get(job_id) is job:
+                self._jobs.pop(job_id, None)
+                self._futures.pop(job_id, None)
+            self._deleting.discard(job_id)
         return job_id
 
     def _ensure_executor(self) -> ThreadPoolExecutor:
-        if self._executor is None:
-            workers = self._max_workers
-            if workers is None:
-                from backend.config import settings
+        with self._lock:
+            if self._executor is None:
+                workers = self._max_workers
+                if workers is None:
+                    from backend.config import settings
 
-                workers = settings.max_concurrent_jobs
-            self._executor = ThreadPoolExecutor(
-                max_workers=max(1, workers), thread_name_prefix="pipeline"
-            )
-        return self._executor
+                    workers = settings.max_concurrent_jobs
+                self._executor = ThreadPoolExecutor(
+                    max_workers=max(1, workers), thread_name_prefix="pipeline"
+                )
+            return self._executor
 
     def _run(self, job: Job, video_path: Path, media: MediaInfo, backend_factory,
              options: PipelineOptions) -> None:
@@ -541,7 +555,8 @@ class JobManager:
                     job.status = "error"
                 self._persist(job)
 
-            self._jobs[job.id] = job
+            with self._lock:
+                self._jobs[job.id] = job
             count += 1
 
         if count:
@@ -552,9 +567,6 @@ class JobManager:
         """Dọn các thư mục job cũ nhất, không bao giờ đụng vào job đang sống."""
         if not jobs_dir.is_dir():
             return
-        active_dirs = {j.workdir.resolve() for j in self._jobs.values()
-                       if j.status in ACTIVE_STATUSES}
-        by_dir = {j.workdir.resolve(): j.id for j in self._jobs.values()}
 
         dirs = sorted(
             (d for d in jobs_dir.iterdir() if d.is_dir()),
@@ -563,13 +575,28 @@ class JobManager:
         )
         for stale in dirs[keep:]:
             resolved = stale.resolve()
-            if resolved in active_dirs:
+            with self._lock:
+                registered = list(self._jobs.values())
+                deleting = set(self._deleting)
+            registered_job = next(
+                (job for job in registered if job.workdir.resolve() == resolved), None
+            )
+            if registered_job is not None and (
+                registered_job.status in ACTIVE_STATUSES or registered_job.id in deleting
+            ):
                 continue
-            shutil.rmtree(stale, ignore_errors=True)
-            job_id = by_dir.get(resolved)
-            if job_id:  # file đã mất thì đừng để job ma trong danh sách
-                self._jobs.pop(job_id, None)
-                self._futures.pop(job_id, None)
+            try:
+                shutil.rmtree(stale)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                log.warning("Không dọn được thư mục job %s: %s", stale, exc)
+                continue
+            if registered_job is not None:
+                with self._lock:
+                    if self._jobs.get(registered_job.id) is registered_job:
+                        self._jobs.pop(registered_job.id, None)
+                        self._futures.pop(registered_job.id, None)
 
 
 manager = JobManager()

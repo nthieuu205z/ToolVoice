@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
+from pydantic import PrivateAttr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -103,6 +105,19 @@ class Settings(BaseSettings):
     # chứ không nhanh thêm. Video vượt trần sẽ xếp hàng chờ, không bị từ chối.
     max_concurrent_jobs: int = 2
 
+    _gemini_runtime_lock: threading.RLock = PrivateAttr(default_factory=threading.RLock)
+
+    def gemini_runtime(self) -> tuple[str, str]:
+        """Read the API-key/backend pair as one runtime configuration value."""
+        with self._gemini_runtime_lock:
+            return self.gemini_api_key, self.gemini_backend
+
+    def set_gemini_runtime(self, api_key: str, backend: str) -> None:
+        """Publish both Gemini runtime fields together to concurrent consumers."""
+        with self._gemini_runtime_lock:
+            self.gemini_api_key = api_key
+            self.gemini_backend = backend
+
     @property
     def provider_config(self):
         return self.provider_config_for(self.tts_provider)
@@ -111,11 +126,13 @@ class Settings(BaseSettings):
         """ProviderConfig với engine giọng đọc CHỈ ĐỊNH — để định tuyến theo giọng mỗi job."""
         from pipeline.backends import ProviderConfig
 
+        gemini_api_key, gemini_backend = self.gemini_runtime()
+
         return ProviderConfig(
             stt_provider=self.stt_provider,
             tts_provider=tts_provider,
-            gemini_api_key=self.gemini_api_key,
-            gemini_backend=self.gemini_backend,
+            gemini_api_key=gemini_api_key,
+            gemini_backend=gemini_backend,
             gemini_stt_model=self.gemini_stt_model,
             gemini_translate_model=self.gemini_translate_model,
             gemini_tts_model=self.gemini_tts_model,
@@ -174,7 +191,7 @@ class Settings(BaseSettings):
 
     @property
     def previews_dir(self) -> Path:
-        return self.static_dir / "previews"
+        return ROOT / "previews"
 
     @property
     def custom_voices_dir(self) -> Path:

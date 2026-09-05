@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -48,7 +51,9 @@ def test_voices_endpoint_shape_matches_frontend_expectations(client):
     # Tính trong thân test: danh sách giọng phụ thuộc kho giọng nhân bản mà fixture
     # autouse đã cách ly — VOICES ở cấp module được tính TRƯỚC khi fixture chạy.
     assert len(body) == len(voices_for(settings.tts_provider))
-    assert set(body[0]) == {"id", "display_name", "preview_url", "custom"}
+    assert set(body[0]) == {
+        "id", "display_name", "preview_url", "preview_status", "custom"
+    }
 
 
 def test_voice_list_follows_the_configured_provider(client, monkeypatch):
@@ -96,6 +101,36 @@ def test_current_job_is_empty_when_idle(client):
 
 def test_unknown_job_returns_404(client):
     assert client.get("/api/jobs/nope").status_code == 404
+
+
+def test_job_events_terminates_only_after_emitting_a_terminal_snapshot(monkeypatch):
+    from backend.routes import jobs as job_routes
+
+    class RacingJob:
+        status = "running"
+        snapshots = 0
+
+        def snapshot(self):
+            self.snapshots += 1
+            if self.snapshots == 1:
+                self.status = "done"
+                return {"job_id": "race", "status": "running"}
+            return {"job_id": "race", "status": "done"}
+
+    job = RacingJob()
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(job_routes.manager, "get", lambda job_id: job)
+    monkeypatch.setattr(job_routes.asyncio, "sleep", no_sleep)
+
+    async def collect_statuses():
+        response = await job_routes.job_events("race")
+        chunks = [chunk async for chunk in response.body_iterator]
+        return [json.loads(chunk.removeprefix("data: ").strip())["status"] for chunk in chunks]
+
+    assert asyncio.run(collect_statuses()) == ["running", "done"]
 
 
 def test_rejects_unknown_voice(client, monkeypatch, tmp_path):

@@ -37,7 +37,8 @@ def _make_backend(tts_provider: str) -> CompositeBackend:
 @router.post("/api/jobs")
 async def create_job(video: UploadFile = File(...), voice_id: str = Form(...)) -> dict:
     # Bước dịch luôn cần Gemini, kể cả khi nhận diện và giọng đọc đã chạy miễn phí.
-    if not settings.gemini_api_key:
+    gemini_api_key, _ = settings.gemini_runtime()
+    if not gemini_api_key:
         raise HTTPException(500, "Chưa có GEMINI_API_KEY. Tạo file .env từ .env.example rồi điền khóa.")
     clone_provider = settings.resolved_clone_provider
     if not is_available(voice_id, settings.tts_provider, clone_provider):
@@ -171,7 +172,7 @@ async def job_events(job_id: str) -> StreamingResponse:
                 yield ": keepalive\n\n"  # giữ kết nối qua proxy/trình duyệt
                 idle = 0.0
 
-            if job.status in ("done", "error", "cancelled"):
+            if snapshot["status"] in ("done", "error", "cancelled"):
                 break
 
             await asyncio.sleep(_SSE_POLL_SECONDS)

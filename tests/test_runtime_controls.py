@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -46,6 +48,56 @@ def test_gemini_update_atomically_persists_without_echo(tmp_path, client, monkey
         f'OTHER_SETTING=keep\nGEMINI_BACKEND=vertex\n'
         f'GEMINI_API_KEY="{_SECRET_MARKER}-with-#-hash"\n'
     )
+
+
+def test_gemini_runtime_consumers_never_observe_a_mismatched_pair(monkeypatch):
+    settings.set_gemini_runtime("developer-key", "developer")
+    key_published = threading.Event()
+    allow_backend_publish = threading.Event()
+    read_finished = threading.Event()
+    observed = []
+    errors = []
+    original_setattr = type(settings).__setattr__
+
+    def pause_between_field_assignments(instance, name, value):
+        original_setattr(instance, name, value)
+        if instance is settings and name == "gemini_api_key" and value == "vertex-key":
+            key_published.set()
+            if not allow_backend_publish.wait(timeout=2):
+                raise TimeoutError("reader never attempted the interleaving")
+
+    monkeypatch.setattr(type(settings), "__setattr__", pause_between_field_assignments)
+
+    def writer():
+        try:
+            settings.set_gemini_runtime("vertex-key", "vertex")
+        except BaseException as exc:
+            errors.append(exc)
+
+    def reader():
+        try:
+            config = settings.provider_config_for("edge")
+            observed.append((config.gemini_api_key, config.gemini_backend))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            read_finished.set()
+
+    writer_thread = threading.Thread(target=writer)
+    writer_thread.start()
+    assert key_published.wait(timeout=2)
+    reader_thread = threading.Thread(target=reader)
+    reader_thread.start()
+    reader_was_blocked = not read_finished.wait(timeout=0.1)
+    allow_backend_publish.set()
+    threads = [writer_thread, reader_thread]
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert all(thread.is_alive() is False for thread in threads)
+    assert reader_was_blocked is True
+    assert errors == []
+    assert observed == [("vertex-key", "vertex")]
 
 
 @pytest.mark.parametrize(
@@ -203,10 +255,55 @@ def test_shutdown_route_returns_before_scheduling(client, monkeypatch):
     calls = []
     monkeypatch.setattr("backend.main.schedule_shutdown", lambda: calls.append("scheduled"))
 
-    response = client.post("/api/shutdown")
+    response = client.post("/api/shutdown", headers={"Host": "127.0.0.1:8000"})
 
     assert response.status_code == 200
     assert response.json() == {"shutting_down": True}
+    assert calls == ["scheduled"]
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        pytest.param({"Host": "attacker.example"}, id="host"),
+        pytest.param(
+            {"Host": "localhost:8000", "Origin": "https://attacker.example"},
+            id="origin",
+        ),
+        pytest.param({"Host": "localhost:not-a-port"}, id="malformed-local-host"),
+        pytest.param(
+            {"Host": "localhost:8000", "Origin": "http://attacker@localhost:8000"},
+            id="origin-userinfo",
+        ),
+    ],
+)
+def test_shutdown_rejects_non_loopback_browser_requests(client, monkeypatch, headers):
+    calls = []
+    monkeypatch.setattr("backend.main.schedule_shutdown", lambda: calls.append("scheduled"))
+
+    response = client.post("/api/shutdown", headers=headers)
+
+    assert response.status_code == 403
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        pytest.param({"Host": "localhost:8000"}, id="local-app"),
+        pytest.param(
+            {"Host": "[::1]:8000", "Origin": "http://[::1]:8000"},
+            id="loopback-browser",
+        ),
+    ],
+)
+def test_shutdown_allows_loopback_app_requests(client, monkeypatch, headers):
+    calls = []
+    monkeypatch.setattr("backend.main.schedule_shutdown", lambda: calls.append("scheduled"))
+
+    response = client.post("/api/shutdown", headers=headers)
+
+    assert response.status_code == 200
     assert calls == ["scheduled"]
 
 

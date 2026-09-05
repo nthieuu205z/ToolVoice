@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -14,6 +15,7 @@ router = APIRouter()
 ENV_PATH = ROOT / ".env"
 _ALLOWED_BACKENDS = {"developer", "vertex"}
 _MAX_API_KEY_LENGTH = 512
+_SETTINGS_WRITE_LOCK = threading.Lock()
 
 
 def _dotenv_quote(value: str) -> str:
@@ -23,7 +25,44 @@ def _dotenv_quote(value: str) -> str:
 
 def _masked_status() -> dict:
     """Never include the actual API key in an HTTP response."""
-    return {"configured": bool(settings.gemini_api_key), "backend": settings.gemini_backend}
+    api_key, backend = settings.gemini_runtime()
+    return {"configured": bool(api_key), "backend": backend}
+
+
+def _persist_gemini_runtime(api_key: str, backend: str) -> None:
+    """Serialize file replacement and runtime publication as one settings update."""
+    with _SETTINGS_WRITE_LOCK:
+        lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.is_file() else []
+        kept = [
+            line for line in lines
+            if not line.startswith("GEMINI_API_KEY=") and not line.startswith("GEMINI_BACKEND=")
+        ]
+        kept.extend([
+            f"GEMINI_BACKEND={backend}",
+            f"GEMINI_API_KEY={_dotenv_quote(api_key)}",
+        ])
+        content = "\n".join(kept).rstrip() + "\n"
+
+        ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=".env.", dir=ENV_PATH.parent)
+        try:
+            if os.name != "nt":
+                os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+            os.replace(tmp_name, ENV_PATH)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass
+            raise
+
+        settings.set_gemini_runtime(api_key, backend)
 
 
 @router.get("/api/settings/gemini")
@@ -56,36 +95,5 @@ async def update_gemini_settings(request: Request) -> dict:
     if not api_key:
         raise HTTPException(400, "Hãy điền Gemini API key.")
 
-    lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.is_file() else []
-    kept = [
-        line for line in lines
-        if not line.startswith("GEMINI_API_KEY=") and not line.startswith("GEMINI_BACKEND=")
-    ]
-    kept.extend([
-        f"GEMINI_BACKEND={backend}",
-        f"GEMINI_API_KEY={_dotenv_quote(api_key)}",
-    ])
-    content = "\n".join(kept).rstrip() + "\n"
-
-    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=".env.", dir=ENV_PATH.parent)
-    try:
-        if os.name != "nt":
-            os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-        os.replace(tmp_name, ENV_PATH)
-    except Exception:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        try:
-            os.unlink(tmp_name)
-        except FileNotFoundError:
-            pass
-        raise
-
-    settings.gemini_api_key = api_key
-    settings.gemini_backend = backend
+    _persist_gemini_runtime(api_key, backend)
     return {"saved": True, **_masked_status()}

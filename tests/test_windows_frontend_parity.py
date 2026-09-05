@@ -154,7 +154,15 @@ class FakeEventSource {
 }
 class FakeEvent { constructor(type) { this.type = type; this.target = null; } preventDefault() {} stopPropagation() {} }
 class FakeFormData { append() {} }
-class FakeAudio { addEventListener() {} pause() {} play() { return Promise.resolve(); } }
+class FakeAudio {
+  static urls = [];
+  constructor(url) { this.src = url; FakeAudio.urls.push(url); }
+  addEventListener() {}
+  pause() {}
+  play() { return Promise.resolve(); }
+  removeAttribute(name) { if (name === "src") this.src = ""; }
+  load() {}
+}
 class FakeXMLHttpRequest {}
 
 const initialJob = {
@@ -163,20 +171,33 @@ const initialJob = {
   stage_elapsed_seconds: 2, created_at: Date.now() / 1000, engine: "edge",
   device: "cpu", batch_size: 4, events: [],
 };
+const fetchUrls = [];
+let cloneCreated = false;
+let previewChecks = 0;
 async function fetch(url) {
-  const body = url === "/api/voices" ? [{ id: "voice-1", display_name: "Voice", custom: false }]
+  fetchUrls.push(url);
+  if (url === "/api/voices/custom") cloneCreated = true;
+  const voices = [{ id: "voice-1", display_name: "Voice", custom: false, preview_status: "missing", preview_url: "" }];
+  if (cloneCreated) voices.push({ id: "clone-1", display_name: "Giọng dài", custom: true, preview_status: previewChecks > 1 ? "ready" : "generating", preview_url: previewChecks > 1 ? "/api/voices/clone-1/preview" : "" });
+  const body = url === "/api/voices" ? voices
     : url === "/api/model" ? { models: [] }
     : url === "/api/jobs" ? { jobs: [initialJob] }
     : url === "/api/settings/gemini" ? { configured: false, backend: "developer" }
-    : url === "/api/voices/custom" ? { id: "clone-1" }
+    : url === "/api/voices/custom" ? { id: "clone-1", preview_status: "generating" }
+    : url === "/api/voices/clone-1/preview-status" ? { status: ++previewChecks > 1 ? "ready" : "generating" }
     : {};
   return { ok: true, status: 200, json: async () => body };
 }
 
+let timerId = 0;
+const timeouts = new Map();
+const intervals = new Map();
 const window = {
   addEventListener() {},
-  setInterval() {},
-  setTimeout() {},
+  setInterval(callback, delay) { const id = ++timerId; intervals.set(id, { callback, delay }); return id; },
+  clearInterval(id) { intervals.delete(id); },
+  setTimeout(callback, delay) { const id = ++timerId; timeouts.set(id, { callback, delay }); return id; },
+  clearTimeout(id) { timeouts.delete(id); },
   confirm: () => true,
 };
 const context = {
@@ -185,7 +206,7 @@ const context = {
   Audio: FakeAudio, XMLHttpRequest: FakeXMLHttpRequest,
   getComputedStyle: () => ({ rowGap: "9" }),
   setTimeout: window.setTimeout,
-  clearTimeout() {},
+  clearTimeout: window.clearTimeout,
 };
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(process.argv[1], "utf8"), context);
@@ -193,25 +214,79 @@ vm.runInContext(fs.readFileSync(process.argv[1], "utf8"), context);
 (async () => {
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
-  const source = FakeEventSource.instances[0];
+  let source = FakeEventSource.instances[0];
   if (!source || !source.onmessage) throw new Error("dashboard did not open the selected job SSE stream");
   source.onmessage({ data: JSON.stringify({ ...initialJob, stage: "translate", percent: 73, message: "Dịch 73%" }) });
   const queueAfterProgress = ids.get("jobList").children[0].innerHTML;
   source.onmessage({ data: JSON.stringify({ ...initialJob, status: "done", stage: "mux", percent: 100, message: "Hoàn tất" }) });
   const queueAfterDone = ids.get("jobList").children[0].innerHTML;
+  const exportCompleted = document.querySelector('[data-stage="mux"]')?.classList.contains("completed") || false;
+  const allFlowsCompleted = graphLinks.every(link => link.classList.contains("flow-complete"));
+
+  await context.refreshJobs();
+  source = FakeEventSource.instances.at(-1);
+  const intervalBaseline = intervals.size;
+  const timeoutBaseline = new Set(timeouts.keys());
+  source.onerror();
+  source.onerror();
+  const firstRetryIds = [...timeouts.keys()].filter(id => !timeoutBaseline.has(id));
+  const oneRetryLoop = firstRetryIds.length === 1;
+  const onePollingFallback = intervals.size === intervalBaseline + 1;
+  const firstRetry = timeouts.get(firstRetryIds[0]);
+  timeouts.delete(firstRetryIds[0]);
+  await firstRetry.callback();
+  source = FakeEventSource.instances.at(-1);
+  source.onopen();
+  const recoveryStopsPolling = intervals.size === intervalBaseline;
+
+  const retryDelays = [];
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const before = new Set(timeouts.keys());
+    source.onerror();
+    const retryId = [...timeouts.keys()].find(id => !before.has(id));
+    if (!retryId) break;
+    const retry = timeouts.get(retryId);
+    retryDelays.push(retry.delay);
+    timeouts.delete(retryId);
+    await retry.callback();
+    source = FakeEventSource.instances.at(-1);
+  }
+  const boundedBackoff = retryDelays.length > 1 && retryDelays.length < 10
+    && retryDelays.every((delay, index) => index === 0 || delay > retryDelays[index - 1]);
+  const persistentPollingFallback = intervals.size === intervalBaseline + 1;
+
   document.querySelector("#cloneName").value = "Giọng dài";
   document.querySelector("#cloneAudio").files = [{ name: "voice.wav" }];
   await ids.get("voiceForm").dispatchEvent(new FakeEvent("submit"));
+  await new Promise(resolve => setImmediate(resolve));
+  const pollsReadiness = fetchUrls.includes("/api/voices/clone-1/preview-status");
+  const previewTimerEntry = [...timeouts.entries()].find(([, timer]) => timer.delay < 4200);
+  if (previewTimerEntry) {
+    timeouts.delete(previewTimerEntry[0]);
+    await previewTimerEntry[1].callback();
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  context.togglePreview(
+    { id: "clone-1", preview_url: "/api/voices/clone-1/preview" },
+    new FakeElement("button")
+  );
   const cloneToast = ids.get("toastStack").children.at(-1)?.textContent;
   process.stdout.write(JSON.stringify({
     queueUpdated: queueAfterProgress.includes("73%") && queueAfterProgress.includes("Dịch 73%"),
     queueCompleted: queueAfterDone.includes("100%") && queueAfterDone.includes("Hoàn tất"),
-    exportCompleted: document.querySelector('[data-stage="mux"]')?.classList.contains("completed") || false,
-    allFlowsCompleted: graphLinks.every(link => link.classList.contains("flow-complete")),
+    exportCompleted,
+    allFlowsCompleted,
     runtimeMetric: ids.get("metricEngine").textContent,
     runtimeDevice: ids.get("metricDevice").textContent,
     graphRuntime: ids.get("graphTtsNote").textContent,
     cloneToast,
+    oneRetryLoop,
+    onePollingFallback,
+    recoveryStopsPolling,
+    boundedBackoff,
+    persistentPollingFallback,
+    pollsReadiness,
+    securePreviewConsumed: FakeAudio.urls.at(-1) === "/api/voices/clone-1/preview",
   }));
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """
@@ -357,3 +432,10 @@ def test_realtime_snapshot_repaints_queue_and_completed_graph(client, tmp_path):
     assert "edge" in behavior["graphRuntime"]
     assert "cpu" in behavior["graphRuntime"]
     assert behavior["cloneToast"] == "Đã tạo giọng nhân bản."
+    assert behavior["oneRetryLoop"] is True
+    assert behavior["onePollingFallback"] is True
+    assert behavior["recoveryStopsPolling"] is True
+    assert behavior["boundedBackoff"] is True
+    assert behavior["persistentPollingFallback"] is True
+    assert behavior["pollsReadiness"] is True
+    assert behavior["securePreviewConsumed"] is True

@@ -560,6 +560,34 @@ def test_download_closes_the_held_file_when_sending_raises(tmp_path, monkeypatch
     assert response.file.closed is True
 
 
+def test_download_disconnect_cancels_stream_and_closes_handle_promptly(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"0123456789")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+    response = job_routes.download_video("job")
+    response.chunk_size = 1
+
+    async def disconnect_during_first_chunk():
+        first_chunk = asyncio.Event()
+        never = asyncio.Event()
+
+        async def receive():
+            await first_chunk.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("more_body"):
+                first_chunk.set()
+                await never.wait()
+
+        await asyncio.wait_for(response(_scope(), receive, send), timeout=0.5)
+
+    asyncio.run(disconnect_during_first_chunk())
+    assert response.file.closed is True
+
+
 def test_download_closes_the_held_file_on_disconnect(tmp_path, monkeypatch):
     job_dir = tmp_path / "job"
     job_dir.mkdir()

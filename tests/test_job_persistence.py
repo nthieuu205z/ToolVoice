@@ -8,6 +8,8 @@ tiếp tục — phải bị đánh dấu lỗi, không được hiện "running
 from __future__ import annotations
 
 import json
+import shutil
+import threading
 from pathlib import Path
 
 from backend import job_manager as jm
@@ -133,3 +135,55 @@ def test_prune_keeps_the_newest_finished_jobs(tmp_path):
 
     kept = sorted(d.name for d in tmp_path.iterdir() if d.is_dir())
     assert kept == ["job2", "job3"]
+
+
+def test_prune_keeps_registry_state_when_directory_cleanup_fails(tmp_path, monkeypatch):
+    manager = JobManager()
+    workdir = _write_meta(tmp_path, "stale", "done")
+    manager._jobs["stale"] = Job(
+        id="stale", filename="a", workdir=workdir, voice_id="v", status="done"
+    )
+
+    def fail_cleanup(_path, *args, **kwargs):
+        raise PermissionError("file is held open")
+
+    monkeypatch.setattr(shutil, "rmtree", fail_cleanup)
+
+    manager.prune(tmp_path, keep=0)
+
+    assert manager.get("stale") is not None
+    assert workdir.is_dir()
+
+
+def test_prune_cannot_remove_a_concurrently_replaced_registry_entry(tmp_path, monkeypatch):
+    manager = JobManager()
+    stale_dir = _write_meta(tmp_path, "same-id", "done")
+    replacement_dir = tmp_path / "replacement"
+    replacement_dir.mkdir()
+    stale = Job(
+        id="same-id", filename="old", workdir=stale_dir, voice_id="v", status="done"
+    )
+    replacement = Job(
+        id="same-id", filename="new", workdir=replacement_dir, voice_id="v", status="running"
+    )
+    manager._jobs[stale.id] = stale
+    cleanup_started = threading.Event()
+    allow_cleanup = threading.Event()
+    real_rmtree = shutil.rmtree
+
+    def blocking_cleanup(path, *args, **kwargs):
+        cleanup_started.set()
+        assert allow_cleanup.wait(timeout=2)
+        real_rmtree(path)
+
+    monkeypatch.setattr(jm.shutil, "rmtree", blocking_cleanup)
+    worker = threading.Thread(target=manager.prune, args=(tmp_path, 0))
+    worker.start()
+    assert cleanup_started.wait(timeout=2)
+    with manager._lock:
+        manager._jobs[replacement.id] = replacement
+    allow_cleanup.set()
+    worker.join(timeout=2)
+
+    assert worker.is_alive() is False
+    assert manager.get("same-id") is replacement

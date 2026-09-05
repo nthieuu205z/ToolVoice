@@ -8,9 +8,10 @@ import mimetypes
 import os
 import secrets
 import stat
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from email.utils import formatdate
+from functools import partial
 from pathlib import Path
 from typing import BinaryIO, Callable, Iterator, Sequence
 from urllib.parse import quote
@@ -37,6 +38,21 @@ class _MalformedRangeHeader(Exception):
 class _RangeNotSatisfiable(Exception):
     def __init__(self, max_size: int) -> None:
         self.max_size = max_size
+
+
+@asynccontextmanager
+async def _collapsing_task_group():
+    """Run an AnyIO task group without leaking a one-error ExceptionGroup to callers."""
+    try:
+        async with anyio.create_task_group() as task_group:
+            yield task_group
+    except BaseException as exc:
+        collapsed = exc
+        while len(getattr(collapsed, "exceptions", ())) == 1:
+            collapsed = collapsed.exceptions[0]
+        if collapsed is exc:
+            raise
+        raise collapsed from collapsed.__cause__ or collapsed.__context__
 
 
 class HeldFileResponse(Response):
@@ -86,43 +102,63 @@ class HeldFileResponse(Response):
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
-            request_headers = Headers(scope=scope)
-            http_range = request_headers.get("range")
-            http_if_range = request_headers.get("if-range")
-            send_header_only = scope["method"].upper() == "HEAD"
+            async with _collapsing_task_group() as task_group:
+                async def run_until_complete(operation) -> None:
+                    await operation()
+                    task_group.cancel_scope.cancel()
 
-            if http_range is None or (
-                http_if_range is not None and not self._should_use_range(http_if_range)
-            ):
-                await self._send_simple(send, send_header_only)
-                return
-
-            try:
-                ranges = self._parse_range_header(http_range, self.stat_result.st_size)
-            except _MalformedRangeHeader as exc:
-                await PlainTextResponse(exc.content, status_code=400)(scope, receive, send)
-                return
-            except _RangeNotSatisfiable as exc:
-                await PlainTextResponse(
-                    status_code=416,
-                    headers={"Content-Range": f"bytes */{exc.max_size}"},
-                )(scope, receive, send)
-                return
-
-            if not ranges:
-                await self._send_simple(send, send_header_only)
-            elif len(ranges) == 1:
-                start, end = ranges[0]
-                await self._send_single_range(
-                    send, start, end, self.stat_result.st_size, send_header_only
+                task_group.start_soon(
+                    run_until_complete,
+                    partial(self._send_response, scope, receive, send),
                 )
-            else:
-                await self._send_multiple_ranges(
-                    send, ranges, self.stat_result.st_size, send_header_only
-                )
+                await run_until_complete(partial(self._listen_for_disconnect, receive))
         finally:
-            # The response-level finally also covers normal completion and disconnects.
             self.close()
+
+    async def _listen_for_disconnect(self, receive: Receive) -> None:
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            # A conforming server blocks after the complete request body. Direct ASGI tests
+            # may return it repeatedly, so yield to the response task explicitly.
+            await anyio.sleep(0)
+
+    async def _send_response(self, scope: Scope, receive: Receive, send: Send) -> None:
+        request_headers = Headers(scope=scope)
+        http_range = request_headers.get("range")
+        http_if_range = request_headers.get("if-range")
+        send_header_only = scope["method"].upper() == "HEAD"
+
+        if http_range is None or (
+            http_if_range is not None and not self._should_use_range(http_if_range)
+        ):
+            await self._send_simple(send, send_header_only)
+            return
+
+        try:
+            ranges = self._parse_range_header(http_range, self.stat_result.st_size)
+        except _MalformedRangeHeader as exc:
+            await PlainTextResponse(exc.content, status_code=400)(scope, receive, send)
+            return
+        except _RangeNotSatisfiable as exc:
+            await PlainTextResponse(
+                status_code=416,
+                headers={"Content-Range": f"bytes */{exc.max_size}"},
+            )(scope, receive, send)
+            return
+
+        if not ranges:
+            await self._send_simple(send, send_header_only)
+        elif len(ranges) == 1:
+            start, end = ranges[0]
+            await self._send_single_range(
+                send, start, end, self.stat_result.st_size, send_header_only
+            )
+        else:
+            await self._send_multiple_ranges(
+                send, ranges, self.stat_result.st_size, send_header_only
+            )
 
     async def _send_simple(self, send: Send, send_header_only: bool) -> None:
         await send(

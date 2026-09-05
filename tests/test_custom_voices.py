@@ -163,6 +163,10 @@ def test_cloning_enabled_whenever_a_clone_engine_exists(client, monkeypatch):
 def test_uploading_a_sample_creates_a_selectable_voice(client):
     body = _upload(client).json()
     assert body["custom"] is True
+    assert body["preview_status"] == "generating"
+    assert client.get(f"/api/voices/{body['id']}/preview-status").json() == {
+        "status": "generating"
+    }
 
     voices = client.get("/api/voices").json()
     mine = next(v for v in voices if v["id"] == body["id"])
