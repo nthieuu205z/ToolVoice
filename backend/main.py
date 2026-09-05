@@ -10,7 +10,8 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.config import settings
 from backend.job_manager import manager
-from backend.routes import jobs, model, voices
+from backend.process_control import schedule_shutdown
+from backend.routes import jobs, model, settings as settings_routes, voices
 from pipeline import custom_voices
 from pipeline.ffmpeg_utils import set_binaries
 
@@ -55,6 +56,13 @@ manager.restore(settings.jobs_dir)
 app.include_router(voices.router)
 app.include_router(model.router)
 app.include_router(jobs.router)
+app.include_router(settings_routes.router)
+
+
+@app.post("/api/shutdown")
+def shutdown_tool() -> dict:
+    schedule_shutdown()
+    return {"shutting_down": True}
 
 # Mount sau cùng để các route /api/* được khớp trước.
 app.mount("/previews", StaticFiles(directory=settings.previews_dir, check_dir=False), name="previews")
