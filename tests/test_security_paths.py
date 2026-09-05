@@ -8,18 +8,24 @@ from pathlib import Path
 import numpy as np
 import pytest
 from fastapi import HTTPException
+from starlette.responses import FileResponse
 
+from backend import secure_files
 from backend.routes import jobs as job_routes
 from pipeline import custom_voices
 from pipeline.audio import write_wav
 
 
-def _scope(spec_version: str = "2.4", headers: dict[str, str] | None = None) -> dict:
+def _scope(
+    spec_version: str = "2.4",
+    headers: dict[str, str] | None = None,
+    method: str = "GET",
+) -> dict:
     return {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": spec_version},
         "http_version": "1.1",
-        "method": "GET",
+        "method": method,
         "scheme": "http",
         "path": "/download",
         "raw_path": b"/download",
@@ -34,7 +40,11 @@ def _scope(spec_version: str = "2.4", headers: dict[str, str] | None = None) -> 
     }
 
 
-async def _response_messages(response, headers: dict[str, str] | None = None) -> list[dict]:
+async def _response_messages(
+    response,
+    headers: dict[str, str] | None = None,
+    method: str = "GET",
+) -> list[dict]:
     messages = []
 
     async def receive():
@@ -43,7 +53,7 @@ async def _response_messages(response, headers: dict[str, str] | None = None) ->
     async def send(message):
         messages.append(message)
 
-    await response(_scope(headers=headers), receive, send)
+    await response(_scope(headers=headers, method=method), receive, send)
     return messages
 
 
@@ -52,8 +62,12 @@ async def _response_body(response, headers: dict[str, str] | None = None) -> byt
     return b"".join(message.get("body", b"") for message in messages)
 
 
-def _response_result(response, headers: dict[str, str] | None = None):
-    messages = asyncio.run(_response_messages(response, headers))
+def _response_result(
+    response,
+    headers: dict[str, str] | None = None,
+    method: str = "GET",
+):
+    messages = asyncio.run(_response_messages(response, headers, method))
     start = next(message for message in messages if message["type"] == "http.response.start")
     response_headers = {
         name.decode("latin-1"): value.decode("latin-1") for name, value in start["headers"]
@@ -188,6 +202,26 @@ def test_download_holds_the_validated_file_when_the_path_is_replaced(tmp_path, m
     assert response.file.closed is True
 
 
+def test_download_response_never_delegates_to_starlette_file_response_call(
+    tmp_path, monkeypatch
+):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"held bytes")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    async def fail_if_delegated(response, scope, receive, send):
+        raise AssertionError("delegated to Starlette FileResponse.__call__")
+
+    monkeypatch.setattr(FileResponse, "__call__", fail_if_delegated)
+
+    status, _, body = _response_result(job_routes.download_video("job"))
+
+    assert status == 200
+    assert body == b"held bytes"
+
+
 @pytest.mark.parametrize(
     ("range_header", "expected_body", "expected_content_range"),
     [
@@ -281,6 +315,106 @@ def test_download_ignores_range_for_a_mismatching_if_range_validator(tmp_path, m
     assert headers["content-length"] == "10"
     assert "content-range" not in headers
     assert body == b"0123456789"
+
+
+def test_download_serves_multiple_ranges_from_the_held_file(tmp_path, monkeypatch):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"0123456789")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    status, headers, body = _response_result(
+        job_routes.download_video("job"), {"range": "bytes=0-1,8-9"}
+    )
+
+    assert status == 206
+    assert headers["content-type"].startswith("multipart/byteranges; boundary=")
+    assert int(headers["content-length"]) == len(body)
+    assert b"Content-Range: bytes 0-1/10\r\n\r\n01\r\n" in body
+    assert b"Content-Range: bytes 8-9/10\r\n\r\n89\r\n" in body
+
+
+@pytest.mark.parametrize(
+    ("request_headers", "expected_status", "expected_length", "expected_content_range"),
+    [
+        pytest.param({}, 200, "10", None, id="full"),
+        pytest.param(
+            {"range": "bytes=2-5"},
+            206,
+            "4",
+            "bytes 2-5/10",
+            id="range",
+        ),
+    ],
+)
+def test_download_head_preserves_get_headers_without_a_body(
+    tmp_path,
+    monkeypatch,
+    request_headers,
+    expected_status,
+    expected_length,
+    expected_content_range,
+):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    video = job_dir / "output.mp4"
+    video.write_bytes(b"0123456789")
+    monkeypatch.setattr(job_routes, "_require_done", lambda job_id: _job_class(job_dir, video)())
+
+    status, headers, body = _response_result(
+        job_routes.download_video("job"), request_headers, method="HEAD"
+    )
+
+    assert status == expected_status
+    assert headers["content-length"] == expected_length
+    assert headers.get("content-range") == expected_content_range
+    assert body == b""
+
+
+def test_owned_writer_never_publishes_a_swapped_source_path(tmp_path, monkeypatch):
+    root = tmp_path / "previews"
+    root.mkdir()
+    outside = tmp_path / "outside.wav"
+    outside.write_bytes(b"outside bytes")
+    target = root / "preview.wav"
+    probe = root / "probe.wav"
+    try:
+        probe.symlink_to(outside)
+        probe.unlink()
+    except OSError as exc:
+        pytest.skip(f"Symlinks unavailable on this platform: {exc}")
+
+    real_replace = os.replace
+    source_swap_attempted = False
+
+    def swap_source_before_replace(source, destination, *args, **kwargs):
+        nonlocal source_swap_attempted
+        destination_matches = (
+            destination == target.name
+            if kwargs.get("dst_dir_fd") is not None
+            else Path(destination) == target
+        )
+        if destination_matches:
+            source_swap_attempted = True
+            source_dir_fd = kwargs.get("src_dir_fd")
+            if source_dir_fd is None:
+                Path(source).unlink()
+                Path(source).symlink_to(outside)
+            else:
+                os.unlink(source, dir_fd=source_dir_fd)
+                os.symlink(outside, source, dir_fd=source_dir_fd)
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(secure_files.os, "replace", swap_source_before_replace)
+
+    with secure_files.atomic_owned_file(root, target) as file:
+        file.write(b"safe preview")
+
+    assert source_swap_attempted is False
+    assert target.is_symlink() is False
+    assert target.read_bytes() == b"safe preview"
+    assert outside.read_bytes() == b"outside bytes"
 
 
 def test_download_closes_the_held_file_when_sending_raises(tmp_path, monkeypatch):

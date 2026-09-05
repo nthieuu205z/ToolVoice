@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import errno
+import hashlib
+import mimetypes
 import os
 import secrets
 import stat
-import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
+from email.utils import formatdate
 from pathlib import Path
-from typing import BinaryIO, Iterator
+from typing import BinaryIO, Callable, Iterator, Sequence
+from urllib.parse import quote
 
 import anyio
 from fastapi import HTTPException
-from starlette.datastructures import MutableHeaders
-from starlette.responses import FileResponse
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.responses import PlainTextResponse, Response
 from starlette.types import Receive, Scope, Send
 
 
@@ -26,8 +29,21 @@ class OpenedOwnedFile:
     stat_result: os.stat_result
 
 
-class HeldFileResponse(FileResponse):
+class _MalformedRangeHeader(Exception):
+    def __init__(self, content: str = "Malformed range header.") -> None:
+        self.content = content
+
+
+class _RangeNotSatisfiable(Exception):
+    def __init__(self, max_size: int) -> None:
+        self.max_size = max_size
+
+
+class HeldFileResponse(Response):
     """Stream one validated open file and close it on every ASGI exit path."""
+
+    chunk_size = 64 * 1024
+    max_ranges = 100
 
     def __init__(
         self,
@@ -37,12 +53,32 @@ class HeldFileResponse(FileResponse):
         media_type: str | None = None,
     ) -> None:
         self.file = opened.file
+        self.path = opened.path
+        self.filename = filename
+        self.stat_result = opened.stat_result
         try:
+            resolved_media_type = (
+                media_type
+                or mimetypes.guess_type(filename or str(opened.path))[0]
+                or "application/octet-stream"
+            )
+            encoded_filename = quote(filename)
+            if encoded_filename != filename:
+                disposition = f"attachment; filename*=utf-8''{encoded_filename}"
+            else:
+                disposition = f'attachment; filename="{filename}"'
+            etag_base = f"{opened.stat_result.st_mtime}-{opened.stat_result.st_size}"
+            headers = {
+                "accept-ranges": "bytes",
+                "content-disposition": disposition,
+                "content-length": str(opened.stat_result.st_size),
+                "last-modified": formatdate(opened.stat_result.st_mtime, usegmt=True),
+                "etag": f'"{hashlib.md5(etag_base.encode(), usedforsecurity=False).hexdigest()}"',
+            }
             super().__init__(
-                opened.path,
-                filename=filename,
-                media_type=media_type,
-                stat_result=opened.stat_result,
+                content=b"",
+                media_type=resolved_media_type,
+                headers=headers,
             )
         except BaseException:
             self.close()
@@ -50,15 +86,45 @@ class HeldFileResponse(FileResponse):
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
-            await super().__call__(scope, receive, send)
+            request_headers = Headers(scope=scope)
+            http_range = request_headers.get("range")
+            http_if_range = request_headers.get("if-range")
+            send_header_only = scope["method"].upper() == "HEAD"
+
+            if http_range is None or (
+                http_if_range is not None and not self._should_use_range(http_if_range)
+            ):
+                await self._send_simple(send, send_header_only)
+                return
+
+            try:
+                ranges = self._parse_range_header(http_range, self.stat_result.st_size)
+            except _MalformedRangeHeader as exc:
+                await PlainTextResponse(exc.content, status_code=400)(scope, receive, send)
+                return
+            except _RangeNotSatisfiable as exc:
+                await PlainTextResponse(
+                    status_code=416,
+                    headers={"Content-Range": f"bytes */{exc.max_size}"},
+                )(scope, receive, send)
+                return
+
+            if not ranges:
+                await self._send_simple(send, send_header_only)
+            elif len(ranges) == 1:
+                start, end = ranges[0]
+                await self._send_single_range(
+                    send, start, end, self.stat_result.st_size, send_header_only
+                )
+            else:
+                await self._send_multiple_ranges(
+                    send, ranges, self.stat_result.st_size, send_header_only
+                )
         finally:
             # The response-level finally also covers normal completion and disconnects.
             self.close()
 
-    async def _handle_simple(
-        self, send: Send, send_header_only: bool, send_pathsend: bool
-    ) -> None:
-        del send_pathsend  # A validated held handle must never fall back to pathsend.
+    async def _send_simple(self, send: Send, send_header_only: bool) -> None:
         await send(
             {
                 "type": "http.response.start",
@@ -77,7 +143,7 @@ class HeldFileResponse(FileResponse):
             more_body = len(chunk) == self.chunk_size
             await send({"type": "http.response.body", "body": chunk, "more_body": more_body})
 
-    async def _handle_single_range(
+    async def _send_single_range(
         self, send: Send, start: int, end: int, file_size: int, send_header_only: bool
     ) -> None:
         headers = MutableHeaders(raw=list(self.raw_headers))
@@ -98,7 +164,7 @@ class HeldFileResponse(FileResponse):
             more_body = len(chunk) == self.chunk_size and start < end
             await send({"type": "http.response.body", "body": chunk, "more_body": more_body})
 
-    async def _handle_multiple_ranges(
+    async def _send_multiple_ranges(
         self,
         send: Send,
         ranges: list[tuple[int, int]],
@@ -106,7 +172,7 @@ class HeldFileResponse(FileResponse):
         send_header_only: bool,
     ) -> None:
         boundary = secrets.token_hex(13)
-        content_length, header_generator = self.generate_multipart(
+        content_length, header_generator = self._generate_multipart(
             ranges, boundary, file_size, self.headers["content-type"]
         )
         headers = MutableHeaders(raw=list(self.raw_headers))
@@ -143,6 +209,89 @@ class HeldFileResponse(FileResponse):
             }
         )
 
+    def _should_use_range(self, http_if_range: str) -> bool:
+        return http_if_range in {self.headers["last-modified"], self.headers["etag"]}
+
+    @classmethod
+    def _parse_range_header(cls, http_range: str, file_size: int) -> list[tuple[int, int]]:
+        try:
+            units, range_value = http_range.split("=", 1)
+        except ValueError:
+            raise _MalformedRangeHeader() from None
+
+        if units.strip().lower() != "bytes":
+            raise _MalformedRangeHeader("Only support bytes range")
+        if range_value.count(",") + 1 > cls.max_ranges:
+            return []
+
+        ranges = cls._parse_ranges(range_value, file_size)
+        if not ranges:
+            raise _MalformedRangeHeader("Range header: range must be requested")
+        if any(not (0 <= start < file_size) for start, _ in ranges):
+            raise _RangeNotSatisfiable(file_size)
+        if any(start >= end for start, end in ranges):
+            raise _MalformedRangeHeader("Range header: start must be less than end")
+        if len(ranges) == 1:
+            return ranges
+
+        ranges.sort()
+        merged = [ranges[0]]
+        for start, end in ranges[1:]:
+            previous_start, previous_end = merged[-1]
+            if start <= previous_end:
+                merged[-1] = (previous_start, max(previous_end, end))
+            else:
+                merged.append((start, end))
+        return merged
+
+    @staticmethod
+    def _parse_ranges(range_value: str, file_size: int) -> list[tuple[int, int]]:
+        ranges: list[tuple[int, int]] = []
+        for part in range_value.split(","):
+            part = part.strip()
+            if not part or part == "-" or "-" not in part:
+                continue
+            start_value, end_value = (value.strip() for value in part.split("-", 1))
+            try:
+                start = int(start_value) if start_value else max(file_size - int(end_value), 0)
+                end = (
+                    int(end_value) + 1
+                    if start_value and end_value and int(end_value) < file_size
+                    else file_size
+                )
+            except ValueError:
+                continue
+            ranges.append((start, end))
+        return ranges
+
+    @staticmethod
+    def _generate_multipart(
+        ranges: Sequence[tuple[int, int]],
+        boundary: str,
+        max_size: int,
+        content_type: str,
+    ) -> tuple[int, Callable[[int, int], bytes]]:
+        boundary_len = len(boundary)
+        static_header_len = 49 + boundary_len + len(content_type) + len(str(max_size))
+        content_length = sum(
+            len(str(start))
+            + len(str(end - 1))
+            + static_header_len
+            + end
+            - start
+            for start, end in ranges
+        ) + 4 + boundary_len
+
+        def header(start: int, end: int) -> bytes:
+            return (
+                f"--{boundary}\r\n"
+                f"Content-Type: {content_type}\r\n"
+                f"Content-Range: bytes {start}-{end - 1}/{max_size}\r\n"
+                "\r\n"
+            ).encode("latin-1")
+
+        return content_length, header
+
     def close(self) -> None:
         if not self.file.closed:
             self.file.close()
@@ -173,13 +322,18 @@ def owned_file_response(
 
 @contextmanager
 def atomic_owned_file(root: Path, value: str | Path) -> Iterator[BinaryIO]:
-    """Yield a secure temporary file and atomically publish it as a direct child."""
+    """Open the final direct child without following links and hold it while writing.
+
+    Creation and path binding are atomic, but replacement content is intentionally written
+    in place: portable pathname replacement cannot bind the rename source to an open handle.
+    A failed write may therefore leave an incomplete preview, never an outside-path write.
+    """
     root_path, candidate_path = _direct_child_paths(root, value)
     if os.name == "nt":
-        with _atomic_owned_file_windows(root_path, candidate_path) as file:
+        with _owned_file_writer_windows(root_path, candidate_path) as file:
             yield file
     else:
-        with _atomic_owned_file_posix(root_path, candidate_path) as file:
+        with _owned_file_writer_posix(root_path, candidate_path) as file:
             yield file
 
 
@@ -228,107 +382,86 @@ def _open_posix(root: Path, candidate: Path) -> OpenedOwnedFile:
         os.close(root_fd)
 
 
-def _validate_posix_target(root_fd: int, name: str) -> None:
-    try:
-        target_stat = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return
-    if not stat.S_ISREG(target_stat.st_mode):
-        raise OSError(errno.EPERM, "Managed target is not a regular file")
-
-
 @contextmanager
-def _atomic_owned_file_posix(root: Path, candidate: Path) -> Iterator[BinaryIO]:
-    """Create and publish through one held directory without following links."""
+def _owned_file_writer_posix(root: Path, candidate: Path) -> Iterator[BinaryIO]:
+    """Open/truncate the final entry relative to one held no-follow directory."""
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         raise OSError(errno.ENOTSUP, "Secure no-follow writes are unavailable")
 
     common_flags = getattr(os, "O_CLOEXEC", 0)
     root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | common_flags)
-    temp_name: str | None = None
-    temp_fd = -1
+    file_fd = -1
     file: BinaryIO | None = None
     try:
         if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
             raise OSError(errno.ENOTDIR, "Managed root is not a directory")
-        _validate_posix_target(root_fd, candidate.name)
 
-        for _ in range(128):
-            temp_name = f".preview-{secrets.token_hex(12)}.tmp"
-            try:
-                temp_fd = os.open(
-                    temp_name,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | common_flags,
-                    0o600,
-                    dir_fd=root_fd,
-                )
-                break
-            except FileExistsError:
-                continue
-        else:
-            raise FileExistsError(errno.EEXIST, "Could not reserve a preview file")
+        file_flags = os.O_WRONLY | os.O_NOFOLLOW | common_flags | getattr(os, "O_NONBLOCK", 0)
+        try:
+            file_fd = os.open(candidate.name, file_flags, dir_fd=root_fd)
+        except FileNotFoundError:
+            file_fd = os.open(
+                candidate.name,
+                file_flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=root_fd,
+            )
 
-        file = os.fdopen(temp_fd, "wb", closefd=True)
-        temp_fd = -1
+        opened_stat = os.fstat(file_fd)
+        entry_stat = os.stat(candidate.name, dir_fd=root_fd, follow_symlinks=False)
+        if not stat.S_ISREG(opened_stat.st_mode) or not stat.S_ISREG(entry_stat.st_mode):
+            raise OSError(errno.EPERM, "Managed target is not a regular file")
+        if (entry_stat.st_dev, entry_stat.st_ino) != (
+            opened_stat.st_dev,
+            opened_stat.st_ino,
+        ):
+            raise OSError(errno.EAGAIN, "Managed target changed while opening")
+
+        os.ftruncate(file_fd, 0)
+        file = os.fdopen(file_fd, "wb", closefd=True)
+        file_fd = -1
         yield file
         file.flush()
         os.fsync(file.fileno())
 
-        opened_stat = os.fstat(file.fileno())
-        entry_stat = os.stat(temp_name, dir_fd=root_fd, follow_symlinks=False)
-        if not stat.S_ISREG(entry_stat.st_mode) or (
-            entry_stat.st_dev,
-            entry_stat.st_ino,
+        final_stat = os.stat(candidate.name, dir_fd=root_fd, follow_symlinks=False)
+        if not stat.S_ISREG(final_stat.st_mode) or (
+            final_stat.st_dev,
+            final_stat.st_ino,
         ) != (opened_stat.st_dev, opened_stat.st_ino):
-            raise OSError(errno.EAGAIN, "Managed temporary file changed before publish")
-
-        _validate_posix_target(root_fd, candidate.name)
-        os.replace(temp_name, candidate.name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
-        temp_name = None
-        os.fsync(root_fd)
+            raise OSError(errno.EAGAIN, "Managed target changed while writing")
     finally:
         if file is not None and not file.closed:
             file.close()
-        if temp_fd >= 0:
-            os.close(temp_fd)
-        if temp_name is not None:
-            try:
-                os.unlink(temp_name, dir_fd=root_fd)
-            except FileNotFoundError:
-                pass
+        if file_fd >= 0:
+            os.close(file_fd)
         os.close(root_fd)
 
 
-def _validate_windows_target(candidate: Path) -> None:
-    try:
-        target_stat = os.lstat(candidate)
-    except FileNotFoundError:
-        return
-    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x00000400)
-    attributes = getattr(target_stat, "st_file_attributes", 0)
-    if attributes & reparse_point or not stat.S_ISREG(target_stat.st_mode):
-        raise OSError(errno.EPERM, "Managed target is not a regular file")
-
-
 @contextmanager
-def _atomic_owned_file_windows(root: Path, candidate: Path) -> Iterator[BinaryIO]:
-    """Hold a non-replaceable root, write a unique file, then replace its direct child.
+def _owned_file_writer_windows(root: Path, candidate: Path) -> Iterator[BinaryIO]:
+    """Open the final entry as a held no-delete-share, no-reparse Win32 handle.
 
-    Python has no Windows dir_fd/openat API. A no-delete-sharing CreateFileW root handle
-    prevents the validated directory from being swapped; mkstemp uses CREATE_NEW, and
-    os.replace atomically replaces the destination entry rather than following reparse data.
+    Python has no Windows dir_fd/openat API. Holding the validated root without delete
+    sharing prevents parent replacement; final-path validation binds the opened file to
+    that root, and omitting delete sharing prevents entry swaps until writing completes.
     """
     import ctypes
+    import msvcrt
+    import ntpath
     from ctypes import wintypes
 
+    generic_write = 0x40000000
     file_read_attributes = 0x0080
     share_read = 0x00000001
     share_write = 0x00000002
+    open_always = 4
     open_existing = 3
     flag_open_reparse_point = 0x00200000
     flag_backup_semantics = 0x02000000
     attribute_directory = 0x00000010
     attribute_reparse_point = 0x00000400
+    file_type_disk = 0x0001
     invalid_handle = ctypes.c_void_p(-1).value
 
     class ByHandleFileInformation(ctypes.Structure):
@@ -363,6 +496,32 @@ def _atomic_owned_file_windows(root: Path, candidate: Path) -> Iterator[BinaryIO
     get_info = kernel32.GetFileInformationByHandle
     get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(ByHandleFileInformation)]
     get_info.restype = wintypes.BOOL
+    get_file_type = kernel32.GetFileType
+    get_file_type.argtypes = [wintypes.HANDLE]
+    get_file_type.restype = wintypes.DWORD
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    get_final_path.restype = wintypes.DWORD
+
+    def file_info(handle):
+        info = ByHandleFileInformation()
+        if not get_info(handle, ctypes.byref(info)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return info
+
+    def final_path(handle) -> str:
+        length = get_final_path(handle, None, 0, 0)
+        if not length:
+            raise ctypes.WinError(ctypes.get_last_error())
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        if not get_final_path(handle, buffer, len(buffer), 0):
+            raise ctypes.WinError(ctypes.get_last_error())
+        path = buffer.value
+        if path.startswith("\\\\?\\UNC\\"):
+            path = "\\\\" + path[8:]
+        elif path.startswith("\\\\?\\"):
+            path = path[4:]
+        return ntpath.normcase(ntpath.normpath(path))
 
     root_handle = create_file(
         str(root),
@@ -376,48 +535,61 @@ def _atomic_owned_file_windows(root: Path, candidate: Path) -> Iterator[BinaryIO
     if root_handle == invalid_handle:
         raise ctypes.WinError(ctypes.get_last_error())
 
-    temp_path: str | None = None
-    temp_fd = -1
+    file_handle = invalid_handle
+    file_fd = -1
     file: BinaryIO | None = None
     try:
-        root_info = ByHandleFileInformation()
-        if not get_info(root_handle, ctypes.byref(root_info)):
-            raise ctypes.WinError(ctypes.get_last_error())
+        root_info = file_info(root_handle)
         if not root_info.file_attributes & attribute_directory:
             raise OSError(errno.ENOTDIR, "Managed root is not a directory")
         if root_info.file_attributes & attribute_reparse_point:
             raise OSError(errno.EPERM, "Managed root is a reparse point")
-        _validate_windows_target(candidate)
 
-        temp_fd, temp_path = tempfile.mkstemp(prefix=".preview-", suffix=".tmp", dir=root)
-        file = os.fdopen(temp_fd, "wb", closefd=True)
-        temp_fd = -1
+        file_handle = create_file(
+            str(candidate),
+            generic_write | file_read_attributes,
+            share_read,
+            None,
+            open_always,
+            flag_open_reparse_point,
+            None,
+        )
+        if file_handle == invalid_handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        opened_info = file_info(file_handle)
+        if get_file_type(file_handle) != file_type_disk:
+            raise OSError(errno.EPERM, "Managed target is not a disk file")
+        if opened_info.file_attributes & (attribute_directory | attribute_reparse_point):
+            raise OSError(errno.EPERM, "Managed target is not a direct regular file")
+
+        root_final = final_path(root_handle)
+        file_final = final_path(file_handle)
+        if ntpath.dirname(file_final) != root_final:
+            raise OSError(errno.EPERM, "Managed target is outside its root")
+        if ntpath.basename(file_final) != ntpath.normcase(candidate.name):
+            raise OSError(errno.EPERM, "Managed target name changed while opening")
+
+        file_fd = msvcrt.open_osfhandle(
+            file_handle,
+            os.O_WRONLY | getattr(os, "O_BINARY", 0),
+        )
+        file_handle = invalid_handle
+        opened_stat = os.fstat(file_fd)
+        if not stat.S_ISREG(opened_stat.st_mode):
+            raise OSError(errno.EPERM, "Managed target is not a regular file")
+        os.ftruncate(file_fd, 0)
+        file = os.fdopen(file_fd, "wb", closefd=True)
+        file_fd = -1
         yield file
         file.flush()
         os.fsync(file.fileno())
-        opened_stat = os.fstat(file.fileno())
-        file.close()
-
-        entry_stat = os.lstat(temp_path)
-        if not stat.S_ISREG(entry_stat.st_mode) or (
-            entry_stat.st_dev,
-            entry_stat.st_ino,
-        ) != (opened_stat.st_dev, opened_stat.st_ino):
-            raise OSError(errno.EAGAIN, "Managed temporary file changed before publish")
-
-        _validate_windows_target(candidate)
-        os.replace(temp_path, candidate)
-        temp_path = None
     finally:
         if file is not None and not file.closed:
             file.close()
-        if temp_fd >= 0:
-            os.close(temp_fd)
-        if temp_path is not None:
-            try:
-                os.unlink(temp_path)
-            except FileNotFoundError:
-                pass
+        if file_fd >= 0:
+            os.close(file_fd)
+        if file_handle != invalid_handle:
+            close_handle(file_handle)
         close_handle(root_handle)
 
 
