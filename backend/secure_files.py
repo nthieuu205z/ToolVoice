@@ -322,12 +322,7 @@ def owned_file_response(
 
 @contextmanager
 def atomic_owned_file(root: Path, value: str | Path) -> Iterator[BinaryIO]:
-    """Open the final direct child without following links and hold it while writing.
-
-    Creation and path binding are atomic, but replacement content is intentionally written
-    in place: portable pathname replacement cannot bind the rename source to an open handle.
-    A failed write may therefore leave an incomplete preview, never an outside-path write.
-    """
+    """Exclusively create a final direct child and hold it while writing."""
     root_path, candidate_path = _direct_child_paths(root, value)
     if os.name == "nt":
         with _owned_file_writer_windows(root_path, candidate_path) as file:
@@ -384,7 +379,7 @@ def _open_posix(root: Path, candidate: Path) -> OpenedOwnedFile:
 
 @contextmanager
 def _owned_file_writer_posix(root: Path, candidate: Path) -> Iterator[BinaryIO]:
-    """Open/truncate the final entry relative to one held no-follow directory."""
+    """Exclusively create the final entry relative to one held no-follow directory."""
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         raise OSError(errno.ENOTSUP, "Secure no-follow writes are unavailable")
 
@@ -392,55 +387,62 @@ def _owned_file_writer_posix(root: Path, candidate: Path) -> Iterator[BinaryIO]:
     root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | common_flags)
     file_fd = -1
     file: BinaryIO | None = None
+    owned_identity: tuple[int, int] | None = None
+    complete = False
     try:
         if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
             raise OSError(errno.ENOTDIR, "Managed root is not a directory")
 
-        file_flags = os.O_WRONLY | os.O_NOFOLLOW | common_flags | getattr(os, "O_NONBLOCK", 0)
-        try:
-            file_fd = os.open(candidate.name, file_flags, dir_fd=root_fd)
-        except FileNotFoundError:
-            file_fd = os.open(
-                candidate.name,
-                file_flags | os.O_CREAT | os.O_EXCL,
-                0o600,
-                dir_fd=root_fd,
-            )
+        file_fd = os.open(
+            candidate.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | common_flags,
+            0o600,
+            dir_fd=root_fd,
+        )
 
         opened_stat = os.fstat(file_fd)
+        owned_identity = (opened_stat.st_dev, opened_stat.st_ino)
         entry_stat = os.stat(candidate.name, dir_fd=root_fd, follow_symlinks=False)
         if not stat.S_ISREG(opened_stat.st_mode) or not stat.S_ISREG(entry_stat.st_mode):
             raise OSError(errno.EPERM, "Managed target is not a regular file")
-        if (entry_stat.st_dev, entry_stat.st_ino) != (
-            opened_stat.st_dev,
-            opened_stat.st_ino,
-        ):
+        if opened_stat.st_nlink != 1 or entry_stat.st_nlink != 1:
+            raise OSError(errno.EPERM, "Managed target has multiple links")
+        if (entry_stat.st_dev, entry_stat.st_ino) != owned_identity:
             raise OSError(errno.EAGAIN, "Managed target changed while opening")
 
-        os.ftruncate(file_fd, 0)
         file = os.fdopen(file_fd, "wb", closefd=True)
         file_fd = -1
         yield file
         file.flush()
         os.fsync(file.fileno())
 
+        opened_stat = os.fstat(file.fileno())
         final_stat = os.stat(candidate.name, dir_fd=root_fd, follow_symlinks=False)
-        if not stat.S_ISREG(final_stat.st_mode) or (
-            final_stat.st_dev,
-            final_stat.st_ino,
-        ) != (opened_stat.st_dev, opened_stat.st_ino):
+        if not stat.S_ISREG(opened_stat.st_mode) or not stat.S_ISREG(final_stat.st_mode):
+            raise OSError(errno.EPERM, "Managed target is not a regular file")
+        if opened_stat.st_nlink != 1 or final_stat.st_nlink != 1:
+            raise OSError(errno.EPERM, "Managed target has multiple links")
+        if (final_stat.st_dev, final_stat.st_ino) != owned_identity:
             raise OSError(errno.EAGAIN, "Managed target changed while writing")
+        complete = True
     finally:
         if file is not None and not file.closed:
             file.close()
         if file_fd >= 0:
             os.close(file_fd)
+        if not complete and owned_identity is not None:
+            try:
+                entry_stat = os.stat(candidate.name, dir_fd=root_fd, follow_symlinks=False)
+                if (entry_stat.st_dev, entry_stat.st_ino) == owned_identity:
+                    os.unlink(candidate.name, dir_fd=root_fd)
+            except OSError:
+                pass
         os.close(root_fd)
 
 
 @contextmanager
 def _owned_file_writer_windows(root: Path, candidate: Path) -> Iterator[BinaryIO]:
-    """Open the final entry as a held no-delete-share, no-reparse Win32 handle.
+    """Exclusively create the final entry as a held no-delete-share Win32 handle.
 
     Python has no Windows dir_fd/openat API. Holding the validated root without delete
     sharing prevents parent replacement; final-path validation binds the opened file to
@@ -453,9 +455,10 @@ def _owned_file_writer_windows(root: Path, candidate: Path) -> Iterator[BinaryIO
 
     generic_write = 0x40000000
     file_read_attributes = 0x0080
+    delete = 0x00010000
     share_read = 0x00000001
     share_write = 0x00000002
-    open_always = 4
+    create_new = 1
     open_existing = 3
     flag_open_reparse_point = 0x00200000
     flag_backup_semantics = 0x02000000
@@ -477,6 +480,9 @@ def _owned_file_writer_windows(root: Path, candidate: Path) -> Iterator[BinaryIO
             ("file_index_high", wintypes.DWORD),
             ("file_index_low", wintypes.DWORD),
         ]
+
+    class FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("delete_file", wintypes.BOOL)]
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     create_file = kernel32.CreateFileW
@@ -502,6 +508,14 @@ def _owned_file_writer_windows(root: Path, candidate: Path) -> Iterator[BinaryIO
     get_final_path = kernel32.GetFinalPathNameByHandleW
     get_final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
     get_final_path.restype = wintypes.DWORD
+    set_file_information = kernel32.SetFileInformationByHandle
+    set_file_information.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    set_file_information.restype = wintypes.BOOL
 
     def file_info(handle):
         info = ByHandleFileInformation()
@@ -538,6 +552,9 @@ def _owned_file_writer_windows(root: Path, candidate: Path) -> Iterator[BinaryIO
     file_handle = invalid_handle
     file_fd = -1
     file: BinaryIO | None = None
+    owned_identity: tuple[int, int, int] | None = None
+    root_final: str | None = None
+    complete = False
     try:
         root_info = file_info(root_handle)
         if not root_info.file_attributes & attribute_directory:
@@ -547,20 +564,27 @@ def _owned_file_writer_windows(root: Path, candidate: Path) -> Iterator[BinaryIO
 
         file_handle = create_file(
             str(candidate),
-            generic_write | file_read_attributes,
+            generic_write | file_read_attributes | delete,
             share_read,
             None,
-            open_always,
+            create_new,
             flag_open_reparse_point,
             None,
         )
         if file_handle == invalid_handle:
             raise ctypes.WinError(ctypes.get_last_error())
         opened_info = file_info(file_handle)
+        owned_identity = (
+            opened_info.volume_serial_number,
+            opened_info.file_index_high,
+            opened_info.file_index_low,
+        )
         if get_file_type(file_handle) != file_type_disk:
             raise OSError(errno.EPERM, "Managed target is not a disk file")
         if opened_info.file_attributes & (attribute_directory | attribute_reparse_point):
             raise OSError(errno.EPERM, "Managed target is not a direct regular file")
+        if opened_info.number_of_links != 1:
+            raise OSError(errno.EPERM, "Managed target has multiple links")
 
         root_final = final_path(root_handle)
         file_final = final_path(file_handle)
@@ -575,15 +599,67 @@ def _owned_file_writer_windows(root: Path, candidate: Path) -> Iterator[BinaryIO
         )
         file_handle = invalid_handle
         opened_stat = os.fstat(file_fd)
-        if not stat.S_ISREG(opened_stat.st_mode):
+        if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink != 1:
             raise OSError(errno.EPERM, "Managed target is not a regular file")
-        os.ftruncate(file_fd, 0)
         file = os.fdopen(file_fd, "wb", closefd=True)
         file_fd = -1
         yield file
         file.flush()
         os.fsync(file.fileno())
+        final_handle = msvcrt.get_osfhandle(file.fileno())
+        final_info = file_info(final_handle)
+        final_identity = (
+            final_info.volume_serial_number,
+            final_info.file_index_high,
+            final_info.file_index_low,
+        )
+        if get_file_type(final_handle) != file_type_disk:
+            raise OSError(errno.EPERM, "Managed target is not a disk file")
+        if final_info.file_attributes & (attribute_directory | attribute_reparse_point):
+            raise OSError(errno.EPERM, "Managed target is not a direct regular file")
+        if final_info.number_of_links != 1:
+            raise OSError(errno.EPERM, "Managed target has multiple links")
+        if final_identity != owned_identity:
+            raise OSError(errno.EAGAIN, "Managed target changed while writing")
+        file_final = final_path(final_handle)
+        if ntpath.dirname(file_final) != root_final:
+            raise OSError(errno.EPERM, "Managed target is outside its root")
+        if ntpath.basename(file_final) != ntpath.normcase(candidate.name):
+            raise OSError(errno.EPERM, "Managed target name changed while writing")
+        complete = True
     finally:
+        if not complete and owned_identity is not None:
+            cleanup_handle = file_handle
+            if cleanup_handle == invalid_handle:
+                try:
+                    cleanup_fd = file.fileno() if file is not None else file_fd
+                    cleanup_handle = msvcrt.get_osfhandle(cleanup_fd)
+                except (OSError, ValueError):
+                    cleanup_handle = invalid_handle
+            if cleanup_handle != invalid_handle:
+                try:
+                    cleanup_info = file_info(cleanup_handle)
+                    cleanup_identity = (
+                        cleanup_info.volume_serial_number,
+                        cleanup_info.file_index_high,
+                        cleanup_info.file_index_low,
+                    )
+                    cleanup_final = final_path(cleanup_handle)
+                    if (
+                        cleanup_identity == owned_identity
+                        and root_final is not None
+                        and ntpath.dirname(cleanup_final) == root_final
+                        and ntpath.basename(cleanup_final) == ntpath.normcase(candidate.name)
+                    ):
+                        disposition = FileDispositionInfo(True)
+                        set_file_information(
+                            cleanup_handle,
+                            4,
+                            ctypes.byref(disposition),
+                            ctypes.sizeof(disposition),
+                        )
+                except OSError:
+                    pass
         if file is not None and not file.closed:
             file.close()
         if file_fd >= 0:

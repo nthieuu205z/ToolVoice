@@ -417,6 +417,71 @@ def test_owned_writer_never_publishes_a_swapped_source_path(tmp_path, monkeypatc
     assert outside.read_bytes() == b"outside bytes"
 
 
+def test_owned_writer_creates_a_new_direct_file_exclusively(tmp_path):
+    root = tmp_path / "previews"
+    root.mkdir()
+    target = root / "preview.wav"
+
+    with secure_files.atomic_owned_file(root, target) as file:
+        file.write(b"safe preview")
+
+    assert target.read_bytes() == b"safe preview"
+    assert target.stat().st_nlink == 1
+
+
+def test_owned_writer_rejects_an_existing_regular_file_without_modifying_it(tmp_path):
+    root = tmp_path / "previews"
+    root.mkdir()
+    target = root / "preview.wav"
+    target.write_bytes(b"existing preview")
+
+    error = None
+    try:
+        with secure_files.atomic_owned_file(root, target) as file:
+            file.write(b"replacement preview")
+    except OSError as exc:
+        error = exc
+
+    assert target.read_bytes() == b"existing preview"
+    assert isinstance(error, FileExistsError)
+
+
+def test_owned_writer_rejects_a_planted_hard_link_without_modifying_it(tmp_path):
+    root = tmp_path / "previews"
+    root.mkdir()
+    outside = tmp_path / "outside.wav"
+    outside.write_bytes(b"outside bytes")
+    target = root / "preview.wav"
+    try:
+        os.link(outside, target)
+    except OSError as exc:
+        pytest.skip(f"Hard links unavailable on this platform: {exc}")
+
+    error = None
+    try:
+        with secure_files.atomic_owned_file(root, target) as file:
+            file.write(b"replacement preview")
+    except OSError as exc:
+        error = exc
+
+    assert outside.read_bytes() == b"outside bytes"
+    assert target.samefile(outside)
+    assert isinstance(error, FileExistsError)
+
+
+def test_owned_writer_removes_its_new_entry_when_writing_fails(tmp_path):
+    root = tmp_path / "previews"
+    root.mkdir()
+    target = root / "preview.wav"
+
+    with pytest.raises(RuntimeError, match="synthesis failed"):
+        with secure_files.atomic_owned_file(root, target) as file:
+            file.write(b"partial preview")
+            raise RuntimeError("synthesis failed")
+
+    assert target.exists() is False
+
+
 def test_download_closes_the_held_file_when_sending_raises(tmp_path, monkeypatch):
     job_dir = tmp_path / "job"
     job_dir.mkdir()
