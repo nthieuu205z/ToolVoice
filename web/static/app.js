@@ -91,9 +91,9 @@ function jobCardMarkup(job) {
 }
 function updateJobCard(card, job, {rebuild = false} = {}) {
   const { statusMeta, percent, html } = jobCardMarkup(job);
-  if (rebuild || card.dataset.status !== job.status || card.dataset.stage !== job.stage) card.innerHTML = html;
+  if (rebuild || card.dataset.status !== job.status || card.dataset.jobStage !== job.stage) card.innerHTML = html;
   else { const progress = card.querySelector(".progress-track > span"); card.querySelector(".job-progress-row span").textContent = job.message || stageLabel(job.stage); card.querySelector(".job-progress-row strong").textContent = `${percent}%`; progress.style.width = `${Math.max(0, Math.min(100, Number(job.percent) || 0))}%`; card.querySelector(".job-card-foot > span").textContent = stageLabel(job.stage); }
-  card.dataset.status = job.status; card.dataset.stage = job.stage || ""; card.className = `job-card ${job.job_id === state.selectedJobId ? "selected" : ""} ${ACTIVE_STATUSES.has(job.status) ? "is-active" : ""}`; card.setAttribute("aria-label", `${job.filename || "Video"}, ${statusMeta.label}, ${percent}%`);
+  card.dataset.status = job.status; card.dataset.jobStage = job.stage || ""; card.className = `job-card ${job.job_id === state.selectedJobId ? "selected" : ""} ${ACTIVE_STATUSES.has(job.status) ? "is-active" : ""}`; card.setAttribute("aria-label", `${job.filename || "Video"}, ${statusMeta.label}, ${percent}%`);
 }
 function bindJobCard(card, job) { card.dataset.jobId = job.job_id; card.setAttribute("role", "button"); card.setAttribute("tabindex", "0"); card.addEventListener("click", event => { if (event.target.closest("button, a")) return; selectJob(job.job_id); }); card.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectJob(job.job_id); } }); }
 function syncJobListViewport() {

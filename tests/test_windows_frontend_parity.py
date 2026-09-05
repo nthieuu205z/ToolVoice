@@ -106,7 +106,11 @@ class FakeElement {
 
 const ids = new Map();
 const selectors = new Map();
-const graphNodes = Array.from({ length: 7 }, () => new FakeElement());
+const graphNodes = ["extract", "transcribe", "translate", "synthesize", "subtitle", "assemble", "mux"].map(stage => {
+  const node = new FakeElement();
+  node.dataset.stage = stage;
+  return node;
+});
 const graphLinks = Array.from({ length: 6 }, () => new FakeElement());
 const graphFrame = new FakeElement();
 graphFrame.className = "graph-scroll-frame";
@@ -118,6 +122,10 @@ const document = {
   addEventListener() {},
   querySelector(selector) {
     if (selector === ".graph-scroll-shell") return graphShell;
+    if (selector === '[data-stage="mux"]') {
+      const queueCards = ids.get("jobList")?.children || [];
+      return [...queueCards, ...graphNodes].find(element => element.dataset.stage === "mux") || null;
+    }
     if (selector.startsWith("#") && !selector.includes(" ")) {
       const id = selector.slice(1);
       if (!ids.has(id)) ids.set(id, new FakeElement("div", id));
@@ -190,13 +198,15 @@ vm.runInContext(fs.readFileSync(process.argv[1], "utf8"), context);
   source.onmessage({ data: JSON.stringify({ ...initialJob, stage: "translate", percent: 73, message: "Dịch 73%" }) });
   const queueAfterProgress = ids.get("jobList").children[0].innerHTML;
   source.onmessage({ data: JSON.stringify({ ...initialJob, status: "done", stage: "mux", percent: 100, message: "Hoàn tất" }) });
+  const queueAfterDone = ids.get("jobList").children[0].innerHTML;
   document.querySelector("#cloneName").value = "Giọng dài";
   document.querySelector("#cloneAudio").files = [{ name: "voice.wav" }];
   await ids.get("voiceForm").dispatchEvent(new FakeEvent("submit"));
   const cloneToast = ids.get("toastStack").children.at(-1)?.textContent;
   process.stdout.write(JSON.stringify({
     queueUpdated: queueAfterProgress.includes("73%") && queueAfterProgress.includes("Dịch 73%"),
-    exportCompleted: graphNodes[6].classList.contains("completed"),
+    queueCompleted: queueAfterDone.includes("100%") && queueAfterDone.includes("Hoàn tất"),
+    exportCompleted: document.querySelector('[data-stage="mux"]')?.classList.contains("completed") || false,
     allFlowsCompleted: graphLinks.every(link => link.classList.contains("flow-complete")),
     runtimeMetric: ids.get("metricEngine").textContent,
     runtimeDevice: ids.get("metricDevice").textContent,
@@ -310,6 +320,22 @@ def test_voice_select_button_stays_bounded(client):
     assert declarations["text-overflow"] == "ellipsis"
 
 
+def test_selected_file_text_wrapper_can_shrink_for_ellipsis(client):
+    html = client.get("/").text
+    css = client.get("/style.css").text
+    parser = _DashboardMarkupParser()
+    parser.feed(html)
+
+    assert {"selected-file-copy"} in parser.class_sets
+    rule = re.search(r"\.selected-file-copy\s*\{([^}]*)\}", css).group(1)
+    declarations = {
+        name.strip(): value.strip()
+        for name, value in (declaration.split(":", 1) for declaration in rule.split(";") if ":" in declaration)
+    }
+    assert declarations["min-width"] == "0"
+    assert declarations["flex"] == "1 1 auto"
+
+
 def test_realtime_snapshot_repaints_queue_and_completed_graph(client, tmp_path):
     script_path = tmp_path / "app.js"
     script_path.write_text(client.get("/app.js").text, encoding="utf-8")
@@ -323,6 +349,7 @@ def test_realtime_snapshot_repaints_queue_and_completed_graph(client, tmp_path):
     behavior = json.loads(result.stdout)
 
     assert behavior["queueUpdated"] is True
+    assert behavior["queueCompleted"] is True
     assert behavior["exportCompleted"] is True
     assert behavior["allFlowsCompleted"] is True
     assert "edge" in behavior["runtimeMetric"]
