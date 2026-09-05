@@ -469,7 +469,7 @@ def test_owned_writer_rejects_a_planted_hard_link_without_modifying_it(tmp_path)
     assert isinstance(error, FileExistsError)
 
 
-def test_owned_writer_removes_its_new_entry_when_writing_fails(tmp_path):
+def test_owned_writer_handles_its_new_entry_safely_when_writing_fails(tmp_path):
     root = tmp_path / "previews"
     root.mkdir()
     target = root / "preview.wav"
@@ -479,7 +479,62 @@ def test_owned_writer_removes_its_new_entry_when_writing_fails(tmp_path):
             file.write(b"partial preview")
             raise RuntimeError("synthesis failed")
 
-    assert target.exists() is False
+    if os.name == "nt":
+        assert target.exists() is False
+    else:
+        assert target.read_bytes() == b"partial preview"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX pathname-cleanup regression")
+def test_posix_failed_write_never_unlinks_a_substituted_entry(tmp_path, monkeypatch):
+    root = tmp_path / "previews"
+    root.mkdir()
+    target = root / "preview.wav"
+    displaced_partial = root / "displaced-partial.wav"
+    replacement = tmp_path / "unrelated.wav"
+    replacement.write_bytes(b"unrelated bytes")
+
+    real_stat = os.stat
+    write_failed = False
+    substituted = False
+
+    def substitute_after_cleanup_stat(path, *args, **kwargs):
+        nonlocal substituted
+        result = real_stat(path, *args, **kwargs)
+        if (
+            write_failed
+            and not substituted
+            and path == target.name
+            and kwargs.get("dir_fd") is not None
+        ):
+            root_fd = kwargs["dir_fd"]
+            os.rename(
+                target.name,
+                displaced_partial.name,
+                src_dir_fd=root_fd,
+                dst_dir_fd=root_fd,
+            )
+            os.link(replacement, target.name, dst_dir_fd=root_fd)
+            substituted = True
+        return result
+
+    monkeypatch.setattr(secure_files.os, "stat", substitute_after_cleanup_stat)
+
+    with pytest.raises(RuntimeError, match="synthesis failed"):
+        with secure_files.atomic_owned_file(root, target) as file:
+            file.write(b"partial preview")
+            write_failed = True
+            raise RuntimeError("synthesis failed")
+
+    if substituted:
+        assert target.exists(), "pathname cleanup unlinked the unrelated replacement"
+        assert target.samefile(replacement)
+        assert target.read_bytes() == b"unrelated bytes"
+    else:
+        assert target.read_bytes() == b"partial preview"
+        assert displaced_partial.exists() is False
+    assert substituted is False
+    assert replacement.read_bytes() == b"unrelated bytes"
 
 
 def test_download_closes_the_held_file_when_sending_raises(tmp_path, monkeypatch):

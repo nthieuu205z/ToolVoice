@@ -379,7 +379,7 @@ def _open_posix(root: Path, candidate: Path) -> OpenedOwnedFile:
 
 @contextmanager
 def _owned_file_writer_posix(root: Path, candidate: Path) -> Iterator[BinaryIO]:
-    """Exclusively create the final entry relative to one held no-follow directory."""
+    """Exclusively create the final entry and leave failed partial writes in place."""
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         raise OSError(errno.ENOTSUP, "Secure no-follow writes are unavailable")
 
@@ -387,8 +387,6 @@ def _owned_file_writer_posix(root: Path, candidate: Path) -> Iterator[BinaryIO]:
     root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | common_flags)
     file_fd = -1
     file: BinaryIO | None = None
-    owned_identity: tuple[int, int] | None = None
-    complete = False
     try:
         if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
             raise OSError(errno.ENOTDIR, "Managed root is not a directory")
@@ -424,19 +422,11 @@ def _owned_file_writer_posix(root: Path, candidate: Path) -> Iterator[BinaryIO]:
             raise OSError(errno.EPERM, "Managed target has multiple links")
         if (final_stat.st_dev, final_stat.st_ino) != owned_identity:
             raise OSError(errno.EAGAIN, "Managed target changed while writing")
-        complete = True
     finally:
         if file is not None and not file.closed:
             file.close()
         if file_fd >= 0:
             os.close(file_fd)
-        if not complete and owned_identity is not None:
-            try:
-                entry_stat = os.stat(candidate.name, dir_fd=root_fd, follow_symlinks=False)
-                if (entry_stat.st_dev, entry_stat.st_ino) == owned_identity:
-                    os.unlink(candidate.name, dir_fd=root_fd)
-            except OSError:
-                pass
         os.close(root_fd)
 
 
